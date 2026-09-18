@@ -15,3 +15,13 @@ validate_pipeline verifica cuatro pasadas, publicación exclusiva de VERIFIED, i
 test_library verifica dos expedientes aislados, procedencia de Writer, documentos globales intactos, notas personales protegidas, cien expedientes con búsqueda/paginación, lectura/edición API y rechazo de rutas fuera de la biblioteca. No prueba visión/OCR ni veracidad semántica del modelo.
 
 Una investigación real requiere autenticación, permisos y acceso al proveedor; se prueba por separado con una pregunta y fuentes que puedas revisar. La compatibilidad con una nueva versión del CLI no queda garantizada por una simulación.
+
+Comprobación de fuentes y publicación: `python tests/test_source_check.py` (fixtures; sin servicios externos).
+
+Reevaluación selectiva: `python tests/test_revisions.py` (casos temporales; sin modelo ni consultas externas).
+
+
+`python -m unittest discover -s tests -p "test_action_trace.py"`: eventos observables sin razonamiento interno, última ejecución, rutas seguras y VERIFIED externos pendientes cuando falta comprobación independiente.
+
+
+Pruebas opcionales del modelo de interfaz: `python -m unittest discover -s tests -p "test_research_ui.py"` (Node para desarrollo). Comprueban proceso finalizado pero inconcluso, veredictos históricos pendientes, eventos sin invenciones, deduplicación y explicaciones principales sin booleanos.

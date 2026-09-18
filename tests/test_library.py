@@ -23,6 +23,8 @@ def fake(self, stage, instructions, data, investigator=False):
 
 with tempfile.TemporaryDirectory() as td:
     root=Path(td)/'repo';root.mkdir();intel=root/'.project-intelligence';(intel/'claims').mkdir(parents=True);(intel/'reports').mkdir();(intel/'evidence').mkdir();(root/'src').mkdir();(root/'src/proof.txt').write_text('fixture\n');(root/'docs').mkdir();(root/'docs/research.md').write_text('GLOBAL UNCHANGED');(root/'GEMINI.md').write_text('fixture contract')
+    (root/'scripts').mkdir()
+    (root/'scripts/frontend.html').write_bytes((Path(__file__).resolve().parents[1]/'scripts/frontend.html').read_bytes())
     p.ROOT=root;p.INTEL=intel;lib.ROOT=root;lib.BASE=intel/'library';front.ROOT=root;front.INTEL=intel;sync.ROOT=root
     for group in p.GROUPS:lib.save(intel/'claims'/f'{group}.json',[])
     lib.save(intel/'state.json',{'obsidian':{'status':'NOT_CONFIGURED','pending_files':[]},'claims':{},'last_commit':None})
@@ -51,6 +53,8 @@ with tempfile.TemporaryDirectory() as td:
     server=front.ThreadingHTTPServer(('127.0.0.1',0),front.Handler);threading.Thread(target=server.serve_forever,daemon=True).start();base='http://127.0.0.1:'+str(server.server_port)
     def get(path):return json.load(urllib.request.urlopen(urllib.request.Request(base+path,headers={'X-Local-Token':front.TOKEN})))
     try:
+        html=urllib.request.urlopen(base+'/?investigacion='+first+'&vista=fuentes').read().decode('utf-8')
+        assert 'Mesa de investigación' in html and '__TOKEN__' not in html
         page=get('/api/library?tag=tema%2Fscale&page=2');assert page['total']==100 and len(page['cases'])==12
         assert get('/api/library?q=searchable-99')['total']==1
         case=get('/api/case?id='+first);assert case['notes']=='PERSONAL IN OBSIDIAN' and len(case['related'])==1

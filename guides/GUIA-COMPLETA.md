@@ -254,3 +254,17 @@ Guarda tus cambios de código y realiza backup de datos. Detén el frontend cuan
 No se implementan OCR/visión, ejecución multiusuario, autenticación pública, búsqueda semántica, trabajo concurrente, almacenamiento distribuido ni despliegue homelab. El servidor HTTP estándar sirve una aplicación local de confianza; publicarlo en GitHub no significa desplegarlo en Internet.
 
 Consulta [GitHub](GITHUB.md) para compartir el programa y [Arquitectura](ARQUITECTURA.md) para mantenerlo.
+
+## Navegación y resumen de una investigación (H1)
+
+Al abrir un expediente, el resumen separa el estado de ejecución de los veredictos. «Ejecución finalizada» significa que el proceso terminó; una investigación con cero VERIFIED sigue inconclusa. Los diagnósticos reproducen motivos y errores registrados: no prueban por sí mismos que el modelo haya realizado las acciones descritas. La comprobación independiente de URLs corresponde al siguiente hito.
+
+Las vistas siguen el orden Resumen → Pregunta → Hipótesis → Evidencia y fuentes → Afirmaciones → Revisión crítica → Resultados → Artefactos → Auditoría. Hipótesis muestra candidatos todavía sin veredicto; Revisión crítica muestra los ya clasificados. Artefactos indica que Studio sigue pendiente.
+
+La barra de direcciones conserva expediente, vista, búsqueda, etiquetas, estado y página. Copia esa dirección para volver al mismo lugar en este equipo. En Afirmaciones, «Enlace a esta afirmación» abre su evidencia directamente. Recargar y Atrás/Adelante restauran la navegación. Estos enlaces siguen siendo locales: otro equipo no tiene acceso al servidor loopback.
+
+Las actualizaciones automáticas no sobrescriben el campo de notas. Pulsa Guardar para persistir cambios; salir del expediente o recargar puede perder un borrador sin guardar. El apartado Estado del servicio y última ejecución conserva el diagnóstico del servicio y no se presenta como historial propio del expediente.
+
+## Reevaluar y aportar material de ChatGPT
+
+En la ficha de Afirmaciones, Aportar nuevas fuentes y reevaluar permite enlaces/texto sin verificar y fuerza otra revisión del claim seleccionado. La solicitud guarda historial y respaldo previo. Esta acción usa Antigravity; Comprobar fuentes sin IA sólo consulta páginas y compara extractos. Ver [REEVALUACION.md](REEVALUACION.md) y [INVESTIGAR-EN-CHATGPT.md](INVESTIGAR-EN-CHATGPT.md).

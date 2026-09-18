@@ -12,6 +12,8 @@ import subprocess
 import sys
 import uuid
 import library
+import revisions
+import source_check
 from setup import initialize
 from urllib.parse import urlparse
 
@@ -19,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 INTEL = ROOT / '.project-intelligence'
 GROUPS = ('architecture', 'dependencies', 'changes')
 FINAL = ('VERIFIED', 'PARTIAL', 'UNSUPPORTED', 'CONTRADICTED')
-RISK_POLICY = 'risk-flags-v1'
+RISK_POLICY = 'risk-flags-source-v2'
 SENSITIVE_DOMAINS = ('legal', 'medical', 'fiscal', 'migratory', 'security')
 
 
@@ -104,6 +106,7 @@ class Runner:
             raise ValueError('Antigravity CLI no está disponible. Instala agy y autentícalo antes de ejecutar.')
 
     def call(self, stage, instructions, data, investigator=False):
+        print('ETAPE: '+{'pass1':'1/4 — Propuesta de hipótesis','pass2':'2/4 — Recopilando evidencia','pass3':'3/4 — Revisión crítica','pass4':'4/4 — Publicando resultados'}.get(stage,stage),flush=True)
         folder = INTEL / ('claims' if investigator else 'evidence')
         prefix = folder / (self.run_id + '_' + stage)
         prompt = (f'La raíz absoluta del proyecto es {ROOT.as_posix()}. Todas las rutas relativas se resuelven ahí. '
@@ -156,6 +159,7 @@ class Runner:
             if details:
                 raise ValueError(f'{stage}: lectura web bloqueada: {details}. Revisa permissions.allow en ~/.gemini/antigravity-cli/settings.json. Salida cruda y stderr conservados en {prefix}.')
             raise ValueError(f'{stage}: respuesta vacía; permisos denegados: {envelope.get("denied_actions", [])}. Consulta {prefix}.stderr.log.')
+        print('ETAPE: '+stage+' completada; validando respuesta y evidencia',flush=True)
         result = array_response(envelope['response'])
         save(prefix.with_suffix('.json'), result)
         return result
@@ -262,6 +266,7 @@ def evaluate(runner, pending, context=None):
         'Devuelve id, claim original, evidence (conserva la recibida y agrega nueva si hace falta), '
         'status VERIFIED|PARTIAL|UNSUPPORTED|CONTRADICTED, skeptic_note y contradiction_search '
         '(explica exactamente qué buscaste y el resultado, incluyendo limitaciones). '
+        'Ausencia de pruebas o no detección no es por sí sola CONTRADICTED; exige refutación directa. '
         'Sin soporte: UNSUPPORTED. VERIFIED requiere evidencia suficiente y búsqueda real de contradicciones. '
         'Aplica la extensión Discriminador de sesgo favorable de GEMINI.md. Clasifica siempre, incluso sin soporte: '
         'domain=legal|medical|fiscal|migratory|security|general, sensible y favorable (booleanos). '
@@ -284,6 +289,11 @@ def evaluate(runner, pending, context=None):
             raise ValueError('PASS 3: veredicto o registro de refutación inválido.')
         if any(e not in c['evidence'] for e in evidence_by_id[c['id']]):
             raise ValueError('PASS 3 eliminó evidencia recibida.')
+        c['requires_external']=original[c['id']]['requires_external']
+        for evidence in c['evidence']:
+            if evidence['type']=='external':
+                receipt=source_check.record_check(evidence,INTEL/'source-checks')
+                evidence['source_check_id']=receipt['id']
         enforce_risk_policy(c)
         if c['status'] == 'VERIFIED':
             if not c['evidence']:
@@ -312,6 +322,7 @@ def enforce_risk_policy(c):
     if not isinstance(refs, list):
         raise ValueError('PASS 3: primary_sources debe ser un array.')
     groups, origins = set(), set()
+    external_primary=False
     for ref in refs:
         index = ref.get('evidence_index')
         if type(index) is not int or not 0 <= index < len(c['evidence']):
@@ -320,10 +331,14 @@ def enforce_risk_policy(c):
             raise ValueError('PASS 3: independencia sin justificación.')
         e = c['evidence'][index]
         if e['type'] == 'external':
+            receipt=source_check.trusted(e,INTEL/'source-checks')
+            if not receipt or receipt.get('eligible') is not True:
+                continue
             if e.get('primary') is not True or e.get('official') is not True:
                 continue
             if c['domain'] == 'legal' and e.get('primary_kind') not in ('law', 'regulation', 'jurisprudence'):
                 continue
+            external_primary=True
             url = urlparse(e['url'])
             origin = (url.hostname, url.path.rstrip('/'))  # Queries/fragments do not create new sources.
         else:
@@ -335,6 +350,17 @@ def enforce_risk_policy(c):
         origins.add(origin)
         groups.add(ref['independence_group'].strip().casefold())
     c['primary_source_count'] = len(groups)
+    if c.get('requires_external') and c['status']=='VERIFIED' and not external_primary:
+        c['status']='UNSUPPORTED'
+        c['skeptic_note']+=' [Falta fuente primaria externa con contenido y extracto comprobados.]'
+    if not c['evidence'] and c['status']=='CONTRADICTED':
+        c['status']='UNSUPPORTED'
+        c['skeptic_note']+=' [No se adjuntó evidencia de refutación.]'
+    if c['evidence'] and all(e['type']=='external' for e in c['evidence']):
+        usable=any((source_check.trusted(e,INTEL/'source-checks') or {}).get('eligible') for e in c['evidence'])
+        if not usable:
+            c['status']='UNSUPPORTED'
+            c['skeptic_note']+=' [Comprobación independiente: ninguna referencia externa tiene contenido y extracto confirmados.]'
     if c['status'] != 'CONTRADICTED':
         if not groups:
             c['status'] = 'UNSUPPORTED'
@@ -534,8 +560,15 @@ def main():
     parser.add_argument('--sync-only', action='store_true')
     parser.add_argument('--brief', help='Archivo UTF-8 del proyecto con pregunta y materiales')
     parser.add_argument('--case', help='Identificador de expediente independiente')
+    parser.add_argument('--claim', help='Reevaluar sólo esta afirmación, conservando historial')
+    parser.add_argument('--revision', help='Solicitud de revisión ya registrada por el frontend')
     args = parser.parse_args()
     case_meta = None
+    review_request = None
+    if args.claim and (args.mode!='document' or not args.case or args.sync_only):
+        parser.error('--claim requiere document --case y no admite --sync-only')
+    if args.revision and not args.claim:
+        parser.error('--revision requiere --claim')
     if args.case:
         if args.mode == 'changelog':
             parser.error('--case no se usa con changelog')
@@ -611,6 +644,17 @@ def main():
             scoped = library.get_rows(case_meta, rows) if case_meta else [c for c in rows if not c.get('investigation_id')]
             pending = [c for c in scoped if c['category'] != 'changes' and
                        (c['status'] == 'UNVERIFIED' or c.get('risk_policy') != RISK_POLICY)]
+            if args.claim:
+                pending=[c for c in scoped if c['id']==args.claim and c['category']!='changes']
+                if len(pending)!=1:raise ValueError('Afirmación inexistente en el expediente')
+                incoming=(revisions.load(args.case,args.revision,args.claim) if args.revision else revisions.submit(args.case,args.claim))
+                if library.read(revisions.folder(args.case,incoming['id'])/'status.json',{}).get('status')!='queued':
+                    raise ValueError('La solicitud ya fue procesada; crea una nueva revisión')
+                review_request=incoming
+                if review_request['claim']!=pending[0]['claim']:raise ValueError('La afirmación cambió desde la solicitud; crea otra revisión')
+                revisions.update(args.case,review_request['id'],'running')
+                context={**context,'new_materials_unverified':review_request,
+                         'previous_evidence_to_recheck':pending[0].get('evidence',[])}
             if not pending:
                 if not any(c['category'] != 'changes' and c['status'] in FINAL for c in scoped):
                     print('No hay claims pendientes. Ejecuta research para una nueva investigación.')
@@ -619,6 +663,10 @@ def main():
                 print('No hay claims pendientes; se reintenta Writer con los veredictos guardados.')
             runner = Runner()
         checked = evaluate(runner, pending, context) if pending else []
+        if review_request:
+            for claim in checked:
+                claim['provenance'][-1]['revision_id']=review_request['id']
+                claim['provenance'][-1]['review_request']='revisiones/'+review_request['id']+'/request.json'
         by_id = {c['id']: c for c in checked}
         rows = [by_id.get(c['id'], c) for c in rows]
         if args.mode == 'changelog':
@@ -626,6 +674,7 @@ def main():
         # Keep reviewed claims even if Writer or sync subsequently fails.
         persist(rows)
         update_state(rows)
+        if review_request:revisions.update(args.case,review_request['id'],'reviewed',review_completed=True,previous_status=pending[0]['status'],new_status=checked[0]['status'])
         audit_flags(rows)
         if args.case:
             case_rows = library.get_rows(case_meta, rows)
@@ -635,7 +684,7 @@ def main():
             report('architecture', [c for c in rows if c['category'] == 'architecture'])
             report('research', [c for c in rows if c['category'] == 'dependencies'])
             publication_rows = case_rows if args.case else [c for c in rows if not c.get('investigation_id')]
-            verified = [c for c in publication_rows if c['category'] != 'changes' and c['status'] == 'VERIFIED']
+            verified = [c for c in publication_rows if c['category'] != 'changes' and c['status'] == 'VERIFIED' and c.get('risk_policy')==RISK_POLICY]
         else:
             report('changelog', checked)
             verified = [c for c in checked if c['status'] == 'VERIFIED']
@@ -655,6 +704,10 @@ def main():
             name = 'docs/changelog/' + runner.run_id + '.md'
             outputs[name] = render('Changelog ' + now()[:10], verified, paragraphs)
             outputs[name] += 'Rango procesado: `' + context['range'] + '`\n'
+        if args.claim:
+            historical=[c['id'] for c in publication_rows if c['status']=='VERIFIED' and c.get('risk_policy')!=RISK_POLICY]
+            if historical:
+                for name in outputs:outputs[name]+='\n## Veredictos históricos pendientes de reevaluación\n\nNo se consolidaron como hechos los siguientes IDs: '+', '.join(historical)+'. Revisa sus fichas.\n'
         changed = []
         for name, text in outputs.items():
             path = ROOT / name
@@ -674,7 +727,12 @@ def main():
             sources_report(library.get_rows(case_meta, rows), library.case_path(args.case) / 'fuentes.md')
         library.refresh(rows)
         update_state(rows, **({'last_commit': head} if head else {}))
+        if review_request:revisions.update(args.case,review_request['id'],'published_local',publication_completed=True)
         sync_docs(changed)
+        if review_request:revisions.update(args.case,review_request['id'],'completed',publication_completed=True,obsidian_sync_completed=load(INTEL/'state.json').get('obsidian',{}).get('status')=='SYNCED')
+    except Exception as exc:
+        if review_request:revisions.update(args.case,review_request['id'],'error',error=str(exc))
+        raise
     finally:
         lock.unlink()
 

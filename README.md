@@ -51,3 +51,19 @@ La interfaz escucha únicamente en 127.0.0.1. Los datos usados en una investigac
 ## Licencia
 
 Todavía no se ha elegido una licencia de distribución. Antes de permitir reutilización pública del código, el propietario debe elegir y añadir LICENSE; no se presupone una licencia abierta.
+
+## Lista de trabajo
+
+[Pendientes por prioridad](PENDIENTES.md), complementados por los criterios de aceptación del [roadmap](ROADMAP.md).
+
+[Cómo se comprueban fuentes y qué significa VERIFIED](guides/VERIFICACION-DE-FUENTES.md).
+
+[Reevaluar una afirmación](guides/REEVALUACION.md) · [Investigar externamente en ChatGPT](guides/INVESTIGAR-EN-CHATGPT.md).
+
+
+Consulta [Estados y recorrido comprobable](guides/ESTADOS-Y-RECORRIDO.md) para distinguir ejecución, veredicto, pendientes y vistas vacías.
+
+
+## Guía y actividad de investigación
+
+Barra de etapas documentadas (separada de certeza), guía de lectura, Actividad reconstruida de registros con enlaces, referencias numeradas con fondos distintos y explicaciones sin banderas de programación en la vista principal. Nuevos ángulos preparan preguntas para investigaciones independientes; no son hallazgos de IA ya ejecutada. [Cómo entender una investigación](guides/COMO-ENTENDER-UNA-INVESTIGACION.md).

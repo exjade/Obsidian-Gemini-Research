@@ -15,8 +15,8 @@ Ya existen expedientes separados, catálogo de URLs, búsqueda/paginación, etiq
 | Hito | Entrega | Dependencia | Estado |
 |---|---|---|---|
 | H0 | Baseline GitHub y tracking del programa | Ninguna | Preparado localmente; publicación manual pendiente |
-| H1 | Flujo claro, diagnósticos y URLs por expediente | H0 publicado | Pendiente |
-| H2 | Fuentes comprobables y relaciones claim/evidencia | H1 | Pendiente |
+| H1 | Flujo claro, diagnósticos y URLs por expediente | H0 publicado | Implementado localmente; revisión/publicación manual pendiente |
+| H2 | Fuentes comprobables y relaciones claim/evidencia | H1 | Parcial: GET/extractos/gate y fichas; normalización, reevaluación selectiva y migración pendientes |
 | H3 | Traza de acciones, auditoría y motivos de decisión | H2 | Pendiente |
 | H4 | Protocolo de investigación rigurosa e índice explicable | H2–H3 | Pendiente |
 | H5 | Experiencia Windows sin consolas auxiliares | H0; coordinar con H3 | Pendiente |
@@ -122,3 +122,23 @@ Aceptación: se puede recorrer visual → dato → claim → evidencia; cifras v
 6. Comprobar lo publicado y el arranque limpio antes de comenzar el siguiente hito.
 
 Ningún número de tests, porcentaje, plazo o estado publicado se rellena con datos de los mockups. No hay cronograma comprometido: se estimará cada hito tras revisar su implementación y migración concretas.
+
+## Validación de H1
+
+La UI separa estado de ejecución, veredictos y conclusión; incluye diagnóstico basado en notas de Skeptic y errores registrados, sin inferir causas a partir de cero VERIFIED. Vistas ordenadas, hipótesis pendientes y revisión crítica, artefactos explícitamente pendientes. URLs conservan expediente, vista, filtros y página; afirmaciones tienen enlaces individuales. Se verificaron recarga y Atrás/Adelante en navegador. Polling no escribe sobre notas personales ni ejecuta guardados. No se migraron ni reclasificaron datos.
+
+## Primera entrega de H2
+
+Comprobación GET independiente con registros/snapshots, comparación conservadora de extractos, bloqueo de fuentes externas no confirmadas como apoyo de VERIFIED y ficha por afirmación. Auditoría de fuentes sin IA conserva los veredictos históricos. Política source-v2 obliga a reevaluar veredictos antiguos antes de Writer. No se implementó todavía el esquema fuente/evidencia/relación normalizado, apoyo semántico humano, búsquedas alternativas automáticas, migración integral ni reevaluación selectiva con fuentes nuevas. Ver guides/VERIFICACION-DE-FUENTES.md.
+
+## Reevaluación selectiva con materiales
+
+Implementada localmente: ficha con enlaces/texto sin verificar, solicitud persistente, respaldo anterior, Collector/Skeptic sólo para el claim elegido, procedencia y estados de fallo/publicación. Faltan migración integral, revisión humana registrada, normativa legal/actuaciones, esquema normalizado de relaciones y versiones Studio. No confundir esta entrega con H2 completo. Ver guides/REEVALUACION.md.
+
+
+### Avance de trazabilidad y estados
+
+H3 parcial: visibles las pasadas futuras y los eventos de herramientas conservados de la última evaluación. No hay todavía transmisión de cada herramienta en vivo ni atribución exclusiva por claim en lotes. Interfaz: estados destacados, acciones pendientes, explicaciones desplegables y auditoría estructurada. Obsidian: avisos nativos por ejecución y afirmación.
+
+
+Guía operativa implementada: etapas documentadas, registro de actividad reconstruido y preguntas para nuevos ángulos. El cierre humano formal y la lluvia de ideas mediante una ejecución dedicada de IA siguen pendientes; preparar una pregunta no ejecuta al proveedor.

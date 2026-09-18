@@ -168,3 +168,7 @@ Este registro de investigación no constituye una cadena de custodia pericial.
 - docs/decisions/: registros tipo ADR (Architecture Decision Record),
   uno por decisión relevante, con contexto, opciones consideradas y
   justificación.
+
+## Comprobación independiente de referencias externas
+
+Los campos searched/fetched y los extractos generados por el modelo son declaraciones que deben corroborarse. El wrapper hace recuperación GET limitada y conserva un registro técnico; no cuenta una referencia externa como apoyo primario si no confirma su contenido y extracto. No inventes IDs ni resultados de comprobación: los produce el wrapper. Un 404 no prueba falsedad ni demuestra que la fuente existiera antes. Una paráfrasis no es una cita textual. Ausencia de prueba o no detección no basta por sí sola para CONTRADICTED; exige evidencia contradictoria directa. Explica límites y separa tu explicación de acciones realmente observadas.

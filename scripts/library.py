@@ -6,10 +6,18 @@ from pathlib import Path
 import re
 import unicodedata
 import uuid
+import source_check
 from urllib.parse import quote, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE = ROOT / '.project-intelligence/library'
+
+
+def needs_review(claim):
+    if claim.get('status') != 'VERIFIED':
+        return True
+    external = [e for e in claim.get('evidence', []) if e.get('type') == 'external']
+    return any(not (source_check.latest(e, ROOT / '.project-intelligence/source-checks') or {}).get('eligible') for e in external)
 
 
 def read(path, fallback=None):
@@ -119,6 +127,19 @@ def refresh(rows=None):
         folder=case_path(meta['id']);related=[c for c in cases if c['id']!=meta['id'] and (set(c.get('tags',[])) & set(meta.get('tags',[])) or set(c.get('source_urls',[])) & set(meta.get('source_urls',[])))]
         metadata='---\ntitle: '+json.dumps(meta['title'],ensure_ascii=False)+'\ntags:\n'+''.join('  - '+t+'\n' for t in ['tipo/investigacion','estado/'+meta['status'],*meta.get('tags',[])])+'case_id: '+meta['id']+'\n---\n'
         text=metadata+'# '+meta['title']+'\n\n'+meta['summary']+'\n\nEstado de ejecución: '+meta['status']+' (distinto del veredicto de las afirmaciones).\n\n'
+        selected=read(folder/'claims.json',[])
+        tone={'running':'info','queued':'info','error':'failure','interrupted':'warning'}.get(meta['status'],'success')
+        label={'running':'En curso — espera a que termine','queued':'En espera','error':'Error — requiere atención','interrupted':'Interrumpida — puedes reintentar','completed':'Ejecución finalizada','historical':'Expediente histórico'}.get(meta['status'],meta['status'])
+        text+='> [!'+tone+'] '+label+'\n> Finalizar una ejecución no verifica todas las afirmaciones.\n\n'
+        pending=[c for c in selected if needs_review(c)]
+        if pending:
+            text+='> [!warning] '+str(len(pending))+' afirmaciones necesitan revisión\n> Consulta Fuentes y Auditoría; aporta respaldo en la ficha del frontend para reevaluar.\n\n'
+        text+='## Estado de cada afirmación\n\n'
+        for c in selected:
+            verdict=c.get('status','UNVERIFIED');ctone={'VERIFIED':'success','CONTRADICTED':'failure','UNSUPPORTED':'warning','PARTIAL':'warning'}.get(verdict,'info')
+            if verdict=='VERIFIED' and needs_review(c):
+                ctone='warning';verdict+=' — fuentes pendientes de comprobación'
+            text+='> [!'+ctone+'] '+verdict+'\n> '+c['claim'].replace('\n',' ')+'\n> Motivo registrado: '+str(c.get('skeptic_note','Pendiente')).replace('\n',' ')+'\n\n'
         for name,label in [('pregunta','Pregunta y contexto'),('resultados','Resultados'),('fuentes','Fuentes y procedencia'),('auditoria','Auditoría'),('notas','Mis notas')]:
             text+='- [[Investigaciones/'+meta['id']+'/'+name+'|'+label+']]\n'
         if meta.get('materials'):
