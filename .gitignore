@@ -1,0 +1,22 @@
+# Local research, evidence, uploads, logs, state and machine configuration.
+/.project-intelligence/
+/docs/architecture.md
+/docs/research.md
+/docs/changelog/*
+!/docs/changelog/.gitkeep
+/docs/decisions/*
+!/docs/decisions/.gitkeep
+.obsidian/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+/work/
+/outputs/
+.DS_Store
+Thumbs.db
