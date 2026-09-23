@@ -34,3 +34,11 @@ Para CLI: `python scripts/pipeline.py document --case ID --review-scope` prepara
 Esta entrega NO implementa todavía edición de formulaciones, comprobación automática de identidad editorial, recuperación con presupuesto, cierre estricto de todas las hipótesis, auditor semántico final ni la reorganización completa de pantallas. La selección puede incluir un candidato no recomendado, con motivo registrado, pero no lo convierte en una hipótesis científicamente válida. La edición/revisión de formulaciones será el siguiente paso del control de alcance.
 
 Luego se abordará recuperación automática de fuentes y el control de cierre en servidor. Hasta entonces, ejecución terminada e informe generado no certifican investigación científicamente cerrada. Los límites actuales de PDF siguen vigentes: 15 MB en formulario y 300 páginas en conversión, sin OCR.
+
+## Resolución científica versionada (entrega 2026-09-22)
+
+Una búsqueda puede empezar desde una pregunta, desde PDFs locales seleccionados o con PDFs más búsqueda complementaria. Los documentos deben estar asociados y autorizados para el expediente; cada operación registra el modo, documentos seleccionados y huella de entrada.
+
+El texto de una afirmación investigada no se edita en el lugar. Para estrecharla se guarda una propuesta versionada con vínculo a la afirmación padre, dimensiones que conserva y motivo. Al aprobarla se crea un claim hijo nuevo en estado pendiente, sin pasajes, evidencia ni veredicto heredados. La afirmación anterior y su historial no cambian. La aprobación de la versión no añade automáticamente el claim al alcance aprobado; se conserva el proceso de alcance vigente.
+
+El motor conserva matrices de pasajes por ronda y una resolución científica proyectada. Los resultados del sistema no cambian los veredictos históricos. Un cierre limitado sólo cuenta como indeterminación cuando cumple sus criterios auditables; un error de proveedor o una búsqueda parcial queda pendiente.

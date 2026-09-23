@@ -12,14 +12,25 @@ Orden de trabajo: alcance → recuperación documental → control de cierre y a
 - [x] Proponer pocas hipótesis y revisar pertinencia, duplicados y presuposiciones antes de pedir aprobación del alcance. Primera entrega local; máximo tres nuevas por lote, no por expediente. Edición de formulaciones y preguntas todavía pendiente.
 - [x] Registrar origen declarado, corrida del generador, revisión y aprobación del alcance; revisión explícita de expedientes antiguos sin reclasificar claims.
 - [x] Ampliación acumulativa: hasta tres hipótesis adicionales por lote, sin sustituir las anteriores; propuestas del usuario, revisión y aprobación explícitas, cancelación de ampliación e historial.
-- [ ] Edición de formulaciones ya investigadas, retirada e invalidación con motivos y versiones de evidencia; no borrar revisiones automáticamente.
-- [ ] Investigar desde pregunta, sólo documentos o documentos con búsqueda complementaria; ampliar fuentes y detectar conclusiones afectadas.
-- [x] Primera entrega de recuperación automática con tres rondas, presupuesto por consultas/páginas/tiempo, operaciones persistentes y detención de salida parcial. Falta comparación controlada real y ampliar resolutores documentales.
+- [ ] Edición, retirada e invalidación de claims investigados.
+  - [x] Proponer una formulación más estrecha como claim descendiente versionado, preservando el original y sin heredar evidencia ni veredicto.
+  - [ ] Editar, retirar o invalidar formulaciones con motivo y versiones de evidencia; no borrar revisiones automáticamente.
+- [ ] Modos de investigación y expansión supervisada de evidencia.
+  - [x] Elegir entre pregunta con búsqueda, sólo documentos y documentos con búsqueda complementaria.
+  - [x] Dirigir búsquedas posteriores a dimensiones pendientes y registrar conclusiones que podrían verse afectadas.
+  - [ ] Ampliar la recuperación semántica, multilingüe y documental más allá de los resolutores actuales.
+- [ ] Recuperación automática con presupuesto acotado.
+  - [x] Primera entrega: tres rondas, presupuesto por consultas/páginas/tiempo, operaciones persistentes y rechazo de salidas parciales.
+  - [ ] Comparar agentes especializados con el flujo anterior en una prueba controlada real; auditar errores, cobertura y respaldo.
 - [x] Separar credibilidad, primariedad, independencia y respaldo concreto de cada afirmación en registros versionados para evaluaciones nuevas. La independencia científica externa y la autenticidad no se infieren automáticamente.
 - [x] Skills especializadas: planificador, revisor de formulación, localizador, recuperador, evaluador de fuentes, evaluador de pertinencia, Skeptic, Writer y auditor final; llamadas independientes coordinadas por el wrapper.
 - [x] Primera validación estructural de entregables de agentes, pasajes, matrices y auditoría con artefactos versionados; evaluación comparativa real pendiente.
 - [x] Primera auditoría de respuesta contra dimensiones del claim, pasajes, veredicto y errores temporales; ampliar reglas por dominio sigue pendiente.
-- [x] Primer control conservador de consolidación sobre TODAS las hipótesis admitidas: respaldo o refutación explícita comprobados. Ausencia de respaldo no equivale a refutación. Registro de indeterminación justificada todavía pendiente.
+- [ ] Cierre científico de todas las hipótesis admitidas.
+  - [x] Exigir respaldo o refutación directa comprobados; la ausencia de respaldo no equivale a refutación.
+  - [x] Registrar una resolución científica versionada y auditable, separada del veredicto histórico, para respaldo, refutación directa o indeterminación justificada.
+  - [x] Revalidar identidad, política, dimensiones, pasajes y criterios de una resolución persistida antes de permitir el cierre del alcance.
+  - [ ] Ampliar criterios de cierre y auditoría a dominios específicos.
 - [x] Separar ejecución terminada, investigación inconclusa y resultados consolidados; informes provisionales con bloqueos y siguiente acción. Primera entrega local; ver guides/CIERRE-CIENTIFICO.md.
 - [x] Explicar bloqueos, importancia, responsable, plan disponible al reevaluar y ayuda eventual, sin presentar intentos pendientes como ejecutados. Recuperación alternativa automática sigue en su tarea independiente.
 - [x] Primera entrega de accesibilidad: foco visible, salto al contenido, navegación por teclado y adaptación móvil conservando comprobar fuentes, reevaluar, auditoría y detalle avanzado.
@@ -78,6 +89,8 @@ Primera implementación documental local disponible; ver guides/ENTREGA-PDF-Y-DO
   - [x] Consolidar metadatos locales versionados desde declaraciones guardadas y recibos técnicos ligados a la evidencia; conservar procedencia y conflictos sin reidentificar fuentes.
 - [ ] Revisar primariedad e independencia. Implementados estados y bases separados, deduplicación explicable y rechazo conservador: «no duplicada» no significa «independiente». La confirmación científica externa, metadatos completos y migración siguen pendientes.
 - [ ] Separar afirmaciones compuestas para no verificar varias conclusiones con una evidencia parcial.
+  - [x] Primera descomposición estructurada en dimensiones y subpreguntas sin alterar el texto original; dirigir la recuperación a huecos y asociar pasajes por dimensión.
+  - [ ] Detectar y proponer la separación automática de proposiciones independientes con revisión de alcance.
 - [x] Exigir para CONTRADICTED un pasaje contradictorio comprobado y auditado semánticamente en evaluaciones nuevas; mismatch, unreported, ausencia de respaldo, detección o URL accesible no refutan.
 - [ ] Revisar la política legal: distinguir normas de hechos procesales. Para hechos, considerar documentos judiciales oficiales pertinentes (acusación, resolución, expediente, transcripción), sin admitir resúmenes como texto normativo.
 - [ ] Revisar detección de dominios sensibles: una imputación de corrupción no debe depender únicamente de que el modelo se autodetecte como sensible.
@@ -91,7 +104,11 @@ Primera implementación documental local disponible; ver guides/ENTREGA-PDF-Y-DO
 - [ ] Explicación del veredicto enlazada con evidencia a favor/en contra y regla aplicada.
 - [x] Separar explicación del modelo de eventos observados; atribución y acciones reutilizadas identificadas. No se promete pensamiento interno completo.
 - [ ] H4: pregunta, subpreguntas, hipótesis competidoras, criterios de refutación, cronología y límites.
+  - [x] Primera entrega versionada por claim: subpreguntas, hipótesis competidoras y criterios de refutación.
+  - [ ] Completar cronología, límites metodológicos y cobertura H4 por dominio.
 - [ ] Rúbrica explicable de fuerza de evidencia; sin inventar probabilidad de verdad ni anular contradicciones con un puntaje.
+  - [x] Primera rúbrica categórica por dimensión/pasaje, sin probabilidades de verdad y conservando evidencia mixta.
+  - [ ] Calibrar y documentar la rúbrica para dominios y diseños de estudio distintos.
 
 ## Prioridad 4 — H5–H6: uso cotidiano
 
@@ -128,7 +145,7 @@ Barra de etapas documentadas (separada de certeza), guía de lectura, Actividad 
 
 ## Entrega de cierre conservador
 
-Writer no consolida un subconjunto cuando otra hipótesis admitida sigue pendiente. Fuentes bloqueadas no se convierten en refutación. Pendiente: criterios y registro de indeterminación justificada, auditor semántico de respuesta y recuperación automática. Los expedientes históricos no cambian de veredicto.
+Writer no consolida un subconjunto cuando otra hipótesis admitida sigue pendiente. Fuentes bloqueadas no se convierten en refutación. La primera resolución indeterminada ya se registra con sus criterios, recibos y límites, separada del veredicto histórico; siguen pendientes su calibración por dominio, el auditor semántico completo de respuesta y la comparación real de recuperación. Los expedientes históricos no cambian de veredicto.
 
 ## Alcance acumulativo — entrega local
 
@@ -159,14 +176,14 @@ El botón Ampliar alcance revisa candidatos fuera del alcance, mantiene los admi
 - [x] Los PDFs cotejados pueden respaldar claims externos sin exigir además URL accesible; se conserva la política de evidencia.
 - [x] Recuperación léxica excluye fragmentos sin coincidencias; no equivale a pertinencia semántica comprobada.
 - [x] Mensajes orientan a reevaluar con materiales existentes, sin exigir aportes adicionales en todos los casos.
-Ya están implementadas las señales deterministas de identidad, las evaluaciones versionadas que separan identidad, primariedad, independencia, acceso y credibilidad, y la auditoría claim–pasaje para evaluaciones nuevas. Continúan pendientes la resolución definitiva de metadatos y catálogo, establecer independencia científica mediante comprobación externa, dividir claims compuestos, migrar explícitamente expedientes históricos y completar la recuperación alternativa. El auditor semántico de la respuesta final sigue siendo un trabajo distinto pendiente.
+Ya están implementadas las señales deterministas de identidad, las evaluaciones versionadas que separan identidad, primariedad, independencia, acceso y credibilidad, y la auditoría claim–pasaje para evaluaciones nuevas. La primera descomposición estructurada de claims y resolución científica versionada ya está implementada; continúan pendientes la resolución definitiva de metadatos y catálogo, establecer independencia científica mediante comprobación externa, detectar proposiciones independientes para separarlas, migrar explícitamente expedientes históricos y ampliar la recuperación alternativa. El auditor semántico completo de la respuesta final sigue siendo un trabajo distinto pendiente.
 
 ## Avance local — identidad, refutación y trazabilidad
 - [x] IDs calculados de fuentes/pasajes y señales de duplicación, sin acreditar autenticidad ni modificar veredictos históricos.
 - [x] Contexto y contradicción separados de referencias de apoyo al contar fuentes primarias.
 - [x] Registro persistente de tiempo y estado del proveedor por llamada, conservado en fallas.
 - [x] Actividad con decisiones de alcance, observaciones humanas y recibos de ejecución disponibles.
-Ver guides/FUENTES-Y-TRAZABILIDAD.md para operación y límites. H2/H3/H4 completos permanecen pendientes.
+Ver guides/FUENTES-Y-TRAZABILIDAD.md para operación y límites. H2/H3/H4 completos permanecen pendientes; esta entrega cubre sólo sus primeros hitos de resolución científica, dimensiones y rúbrica.
 
 ## Avance local — orientación y reutilización supervisada
 Ver guides/REUTILIZACION-Y-ACCESIBILIDAD.md. Planes disponibles no son acciones ejecutadas; coincidencia léxica no demuestra pertinencia. El sistema exige registrar pertinencia para cada pasaje reutilizado, pero la evaluación semántica sigue dependiendo del modelo. Comparación científica y accesibilidad completa permanecen pendientes.
