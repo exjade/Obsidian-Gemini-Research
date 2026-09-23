@@ -60,6 +60,8 @@ Todavía no se ha elegido una licencia de distribución. Antes de permitir reuti
 
 [Reevaluar una afirmación](guides/REEVALUACION.md) · [Investigar externamente en ChatGPT](guides/INVESTIGAR-EN-CHATGPT.md).
 
+[Investigación automática por agentes](guides/INVESTIGACION-AUTOMATICA-POR-AGENTES.md): diferencia la comprobación técnica de la búsqueda automática, explica las tres rondas y el cierre con límites.
+
 
 Consulta [Estados y recorrido comprobable](guides/ESTADOS-Y-RECORRIDO.md) para distinguir ejecución, veredicto, pendientes y vistas vacías.
 
@@ -67,3 +69,19 @@ Consulta [Estados y recorrido comprobable](guides/ESTADOS-Y-RECORRIDO.md) para d
 ## Guía y actividad de investigación
 
 Barra de etapas documentadas (separada de certeza), guía de lectura, Actividad reconstruida de registros con enlaces, referencias numeradas con fondos distintos y explicaciones sin banderas de programación en la vista principal. Nuevos ángulos preparan preguntas para investigaciones independientes; no son hallazgos de IA ya ejecutada. [Cómo entender una investigación](guides/COMO-ENTENDER-UNA-INVESTIGACION.md).
+
+
+## PDFs digitales opcionales
+
+La interfaz puede conservar originales, preparar texto por página y vincular pasajes comprobables a una reevaluación. Instala el extra con `powershell -ExecutionPolicy Bypass -File scripts/install-documents.ps1`; `-Lite` instala sólo la extracción ligera. Docling usa CPU y modelos descargados en su primera ejecución. La preparación del documento no verifica afirmaciones. [Guía de PDFs y prueba Docling](guides/ENTREGA-PDF-Y-DOCLING.md). OCR y NotebookLM siguen pendientes.
+
+
+## Aprobar qué se investigará
+
+Los nuevos expedientes preparan una propuesta y revisión de hipótesis antes de buscar evidencia. En Pregunta y alcance selecciona una a tres, aprueba y después inicia la investigación. Los expedientes anteriores necesitan revisión explícita del alcance para reevaluar. [Guía de alcance y siguientes features](guides/ALCANCE-Y-NUEVAS-FEATURES.md).
+
+Guía del control de consolidación e informes provisionales: [Cierre científico](guides/CIERRE-CIENTIFICO.md). La barra de etapas registradas no equivale a cierre.
+
+Guía: [Ampliar el alcance sin reiniciar](guides/AMPLIAR-ALCANCE.md). Tres hipótesis nuevas por lote; historial y evidencia conservados.
+
+Guía: [Eliminar investigación y empezar desde cero](guides/ELIMINAR-INVESTIGACION.md). La eliminación conserva una copia recuperable; restauración desde la interfaz todavía pendiente.

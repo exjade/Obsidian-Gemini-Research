@@ -172,3 +172,25 @@ Este registro de investigación no constituye una cadena de custodia pericial.
 ## Comprobación independiente de referencias externas
 
 Los campos searched/fetched y los extractos generados por el modelo son declaraciones que deben corroborarse. El wrapper hace recuperación GET limitada y conserva un registro técnico; no cuenta una referencia externa como apoyo primario si no confirma su contenido y extracto. No inventes IDs ni resultados de comprobación: los produce el wrapper. Un 404 no prueba falsedad ni demuestra que la fuente existiera antes. Una paráfrasis no es una cita textual. Ausencia de prueba o no detección no basta por sí sola para CONTRADICTED; exige evidencia contradictoria directa. Explica límites y separa tu explicación de acciones realmente observadas.
+
+## Evidencia documental local (ruta complementaria de verificación)
+
+Cuando una web no permita recuperar el texto completo, puedes usar una copia PDF aportada al expediente. Conserva la referencia editorial y busca verificar externamente su identidad; no declares que la URL se abrió si fue bloqueada. El wrapper conserva el original, SHA-256, versión de extracción, página física y fragmento. Usa únicamente los identificadores suministrados en local_document_fragments; nunca inventes páginas, IDs o citas.
+
+Registra evidence.type=document con document_id, document_sha256, extraction_id, chunk_id, physical_page y excerpt literal. El wrapper coteja el extracto contra el fragmento conservado. Una coincidencia textual demuestra presencia en esa extracción, no autenticidad, autoridad ni apoyo semántico a toda la afirmación. Skeptic debe revisar el contexto recibido, límites, población, método y contradicciones.
+
+Un PDF sólo cuenta como fuente primaria si tiene revisión de identidad registrada para este expediente, el modelo justifica su primariedad y el tipo documental es adecuado. Una revisión de literatura no es un estudio original; sus referencias pueden orientar la búsqueda de originales. Las normas requieren texto oficial pertinente. No supongas dos fuentes independientes por tener un PDF y otra URL del mismo paper: DOI coincidente cuenta como una identidad documental.
+
+La revisión humana de identidad no verifica claims. La extracción tampoco cambia veredictos; se requiere una reevaluación explícita. Si el pasaje está partido por guiones, es ilegible o no coincide literalmente, conserva el límite y usa otro pasaje comprobable; no rellenes texto desde memoria. OCR y NotebookLM no están implementados en esta entrega.
+
+## Control de alcance de expedientes
+
+Para expedientes de investigación, PASS 1 propone pocas hipótesis útiles y delimitadas. Una revisión separada de pertinencia aplica skills/hypothesis-review/SKILL.md y explica cada candidato. Esa revisión no sustituye Evidence collector ni Skeptic. El usuario aprueba entre una y tres hipótesis antes de buscar evidencia o ejecutar Writer. Investiga exclusivamente las admitidas; conserva las demás y su historial, sin considerarlas resueltas. Cambios de pregunta o formulación requieren nueva revisión y aprobación. No interpretes aprobación de alcance como respaldo factual. Los expedientes históricos requieren revisión explícita de alcance antes de reevaluar; no los reclasifiques silenciosamente.
+
+## Control de consolidación por expediente
+
+Antes de Writer, todas las hipótesis admitidas deben pasar el control closure-v1. Falta de apoyo, restricciones y errores no resuelven una hipótesis ni demuestran refutación. Una refutación requiere pasaje de contradicción explícito comprobado. Ante pendientes, conservar revisiones y emitir informe provisional con responsables y acciones. No inferir indeterminación justificada de un error de recuperación; su protocolo sigue pendiente. El control no sustituye auditoría semántica ni garantiza verdad absoluta.
+
+## Ampliación del alcance
+
+En scope-v2, el máximo de tres se aplica a hipótesis nuevas por lote. Mantener las admitidas y sus veredictos/evidencias. Revisar sólo candidatos adicionales, exigir aprobación explícita y registrar motivos. Proponer no verifica; retirar, invalidar o reformular necesita un protocolo independiente. Una ampliación sin decidir bloquea consolidación, no borra revisiones anteriores.

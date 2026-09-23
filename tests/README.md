@@ -25,3 +25,7 @@ Reevaluación selectiva: `python tests/test_revisions.py` (casos temporales; sin
 
 
 Pruebas opcionales del modelo de interfaz: `python -m unittest discover -s tests -p "test_research_ui.py"` (Node para desarrollo). Comprueban proceso finalizado pero inconcluso, veredictos históricos pendientes, eventos sin invenciones, deduplicación y explicaciones principales sin booleanos.
+
+Traspaso web: `python -m unittest discover -s tests -p "test_handoff.py"`: hashes de base, comprobación de parche sin aplicación, rechazo de rutas privadas, bloqueo de investigación activa, respaldo íntegro y detección de cambios concurrentes. Fixtures temporales; no modelo ni vault real.
+
+Recuperación: test_collector_checkpoint.py comprueba fallo/reanudación de Skeptic, caducidad, integridad e invalidación; test_human_review.py comprueba observaciones sin cambiar veredictos, evidencia histórica, sesión y bloqueo activo. test_documents.py incluye ausencia de coincidencias y respaldo PDF sin URL accesible; test_research_ui.py separa evaluación de resolución y explica errores. Fixtures sin proveedor real.

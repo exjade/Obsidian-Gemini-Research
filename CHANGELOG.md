@@ -4,6 +4,38 @@ Registra cambios del código y documentación del producto. Es distinto de docs/
 
 ## Baseline local — pendiente de primer commit y release
 
+### 2026-09-18 — Investigación automática especializada (pendiente de publicación)
+
+- Acción principal por claim con nueve roles especializados, tres rondas limitadas y salidas JSON validadas.
+- Operaciones persistentes con progreso, presupuesto, manifiestos, matrices, auditoría y cierre `excluded_with_limit` sin borrar el veredicto histórico.
+- Comprobación técnica de páginas separada de la investigación; doble clic deduplicado y resultado visible.
+- Trazas con total previo al recorte, acciones omitidas, consultas agrupadas, atribución por manifiesto y descarga completa.
+- Servicio único en 8770 con esquema/build/PID/puerto y bloqueo de acciones ante versiones incompatibles.
+
+### 2026-09-18 — Control de alcance (pendiente de publicación)
+
+- Nuevos expedientes se detienen después de proponer y revisar hipótesis; aprobación explícita de una a tres antes de Collector/Writer.
+- Selección versionada, motivos, origen declarado y corridas de generación/revisión visibles; propuestas no admitidas se conservan.
+- Revisión de alcance para expedientes históricos y bloqueo equivalente desde frontend/CLI.
+- Revisor con SKILL.md, pruebas de aprobación, integridad del alcance y compatibilidad con pipeline.
+- Registrado backlog acordado: recuperación, agentes especializados, auditoría de respuesta, cierre científico y accesibilidad. Estos bloques siguen pendientes.
+
+### 2026-09-18 — Evidencia PDF local (pendiente de publicación)
+
+- Original y hash conservados por expediente; extracción paginada y versionada con pypdf o Docling opcional en CPU, sin OCR.
+- Interfaz PDF con pasos, paneles Abrir/Cerrar, campos completos, métodos con nombres comprensibles y límites visibles.
+- PDFs disponibles en la interfaz, lectura por página y registro de revisión de identidad; ninguna de estas acciones verifica claims.
+- Fragmentos exactos enviados a Collector/Skeptic, cotejo literal y deduplicación de identidad por DOI.
+- Benchmark de dos papers, 39 páginas; limitaciones y pasos de reevaluación documentados.
+
+### 2026-09-18 — Recuperación del Collector (pendiente de publicación)
+
+- Evaluación por afirmación, registros separados y conservación de revisiones completas ante fallo posterior.
+- Tiempo máximo de 900 segundos y diagnóstico consistente; posición de la afirmación visible durante la ejecución.
+- Entradas exactas del proveedor conservadas y auditoría con alcance explícito.
+- Publicación inconclusa registrada como terminada; placeholders iniciales siguen pendientes.
+- Pruebas de reanudación y timeout; fixture de integración sintético sin copiar investigaciones privadas.
+
 ### Implementado
 
 - Interfaz local y biblioteca con búsqueda, filtros, etiquetas y paginación.
@@ -68,3 +100,40 @@ Navegación unificada: recorrido numerado Pregunta, Hipótesis, Evidencia, Revis
 
 
 Diagnóstico por afirmación: separa ausencia de evidencia, fuentes pendientes, direcciones caídas, restricciones y pasajes no confirmados. Propone siguientes acciones sin modificar veredictos. PENDIENTES actualizado y copiado a outputs y Proyecto en Obsidian.
+
+### 2026-09-18 — Control conservador de consolidación
+
+- Bloqueo de Writer cuando una hipótesis del alcance aprobado sigue pendiente.
+- Informes provisionales, archivo local de informes anteriores y avisos en frontend/Obsidian.
+- Fuentes restringidas no se convierten en refutación; veredictos históricos requieren revisión explícita.
+- Corregido panel de alcance en Pregunta y envío del expediente al solicitar su revisión.
+
+### 2026-09-18 — Ampliación acumulativa del alcance
+
+- scope-v2 mantiene el alcance aprobado mientras prepara una ampliación independiente.
+- Añade hasta tres hipótesis por lote; sin límite total de tres por expediente.
+- Propuestas manuales UNVERIFIED y cancelación de ampliaciones con historial.
+- Consolidación bloqueada mientras exista una ampliación sin decidir; sin borrar evidencia ni reiniciar revisiones vigentes.
+
+### 2026-09-18 — Eliminar investigación
+
+- Eliminación recuperable desde frontend con confirmación del nombre.
+- Retirada aislada de biblioteca y Obsidian, copia de notas personales, bloqueo mientras hay tareas activas y conservación de evidencia compartida.
+- Formulario nuevo después de eliminar; índices regenerados y sincronización con aviso de fallos.
+
+### 2026-09-18 — Correcciones de clasificación de fuentes
+
+- El validador permite corregir anotaciones de primariedad, oficialidad, tipo y relación sin confundirlas con evidencia eliminada. Mantiene inmutables identidad, extracto y recuperación originales.
+- Cambios de anotaciones trazados en provenance; futuras fallas del frontend conservan el error específico del proceso.
+
+## 2026-09-18 — Traspaso seguro a ChatGPT web
+Actualizadas guía, instrucciones y estado de continuidad con las capacidades actuales. Entrega con código sin publicar, manifiesto SHA-256 y copia aislada. Nuevo verificador de hashes y parche sin aplicación; bloqueo de rutas privadas. Nuevo respaldo privado que rechaza trabajos activos y no marca copias que cambiaron como completas. Flujo de aplicación/pruebas por Antigravity y commit/push manuales. Pruebas: 57 existentes en copia aislada y 7 nuevas de traspaso. Carga web y respaldo real pendientes de sesión iniciada y fin de investigación.
+
+## 2026-09-18 — Recuperación y revisión accesible
+Collector completo validado se conserva antes de Skeptic y puede reutilizarse con TTL de seis horas e invalidación explícita; veredictos y comprobaciones externas siguen independientes. Progreso separa lote pendiente, alcance y evaluaciones conservadas. Revisión humana opcional con evidencia congelada e historial, sin promover estados; informe exportable a Obsidian. Recuperación PDF excluye coincidencias cero y permite respaldo documental comprobable sin URL accesible adicional. Respaldo privado real terminado tras inactividad.
+
+## 2026-09-18 — Identidad de referencias y trazabilidad
+Deduplicación conservadora antes de contar corroboraciones; IDs calculados de fuentes y pasajes, relaciones de contexto/contradicción separadas del apoyo. CONTRADICTED exige refutación explícita con pasaje comprobado. Recibos de inicio/final/duración/estado por llamada y atribución de acciones a entradas registradas, conservando origen de Collector reutilizado. Actividad incorpora decisiones del alcance y observaciones humanas opcionales. No se reclasifican silenciosamente expedientes históricos ni se acredita autenticidad con un identificador. Ver guides/FUENTES-Y-TRAZABILIDAD.md.
+
+## 2026-09-18 — Orientación, accesibilidad y reutilización
+Bloqueos explican importancia, responsable y plan disponible al reevaluar sin fingir intentos ejecutados. Foco visible, salto de teclado y vista móvil en una columna. Candidatos web limitados entre expedientes, sin copiar veredictos; revisión estructurada de pertinencia con límites y revalidación externa. Comparador de registros controla pregunta/alcance y conserva desconocidos cuando faltan recibos o auditoría. No demuestra superioridad de especialización ni completa accesibilidad o recuperación semántica. Ver guides/REUTILIZACION-Y-ACCESIBILIDAD.md.
