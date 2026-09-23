@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import research_agents
 import research_operations
 import source_identity
+import pipeline
 import frontend
 import library
 
@@ -45,6 +47,217 @@ class FakeProvider:
 
 
 class AutomaticResearchTests(unittest.TestCase):
+    def test_retriever_provider_keeps_tools_narrow_and_supplies_authorized_document_payload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            skill=root/'skills/research-retriever/SKILL.md'
+            skill.parent.mkdir(parents=True)
+            skill.write_text((Path(__file__).resolve().parents[1]/'skills/research-retriever/SKILL.md').read_text(encoding='utf-8'),encoding='utf-8')
+            observed={}
+            class FakeRunner:
+                run_id='retriever-fixture'
+                def call(self,stage,instructions,data,agent,budget):
+                    observed.update(stage=stage,instructions=instructions,data=data,agent=agent,budget=budget)
+                    return [{'sources':[{'source_id':'doc:authorized-1','document_id':'authorized-1',
+                        'dimension_ids':['outcome'],'purpose':'support','passages':[
+                            {'evidence_id':'doc:authorized-1:p1','excerpt':'Literal local passage.', 'page':1}]}]}]
+
+            payload={'authorized_documents':[{'document_id':'authorized-1','page':1,
+                      'text':'Literal local passage.'}]}
+            call=research_agents.AgentCall('retriever',payload,{
+                'claim_ids':['claim-1'],'budget_remaining':{'seconds':120,'round_queries':2,'round_pages':3}})
+            with patch.object(pipeline,'Runner',FakeRunner):
+                result=research_operations.PipelineProvider(root)(call)
+            self.assertEqual(observed['budget']['allowed_tools'],['search_web','read_url_content'])
+            self.assertNotIn('view_file',observed['budget']['allowed_tools'])
+            self.assertIn('No abras rutas locales',observed['instructions'])
+            self.assertIn('brain/<conversation>/.system_generated/steps/<n>/content.md',observed['instructions'])
+            self.assertIn('RESTRICCIÓN EXPLÍCITA DEL WRAPPER',observed['instructions'])
+            self.assertEqual(observed['data']['payload'],payload)
+            self.assertEqual(result['sources'][0]['passages'][0]['excerpt'],'Literal local passage.')
+
+    def _flat_relevance_evaluation(self):
+        return {
+            'source_id':'doi:10.5093/psed2020a20',
+            'evidence_id':'doi:10.5093/psed2020a20:ev1',
+            'intervention':'mismatch','spacing':'unreported','comparison':'unreported',
+            'population':'unreported','material':'unreported','outcome':'supports',
+            'horizon':'unreported','overall_relation':'mismatch',
+            'basis':'Observed flat provider evaluation; no semantic values are inferred.',
+        }
+
+    def test_relevance_matrix_canonical_list_is_preserved(self):
+        row={'source_id':'source-1','evidence_id':'passage-1',
+             'dimensions':{key:'unreported' for key in research_agents.DIMENSIONS},
+             'overall_relation':'unreported','basis':'Canonical fixture.'}
+        original={'matrix':[row]}
+        normalized=research_operations._normalize_relevance_matrix(original)
+        self.assertEqual(normalized,original)
+        self.assertNotIn('matrix_structure_origin',normalized)
+        self.assertEqual(research_agents.validate_agent_output('relevance_evaluator',normalized),original)
+
+    def test_relevance_matrix_normalizes_only_observed_flat_evaluations(self):
+        evaluation=self._flat_relevance_evaluation()
+        raw={'evaluations':[dict(evaluation)],'usage_events':[]}
+        normalized=research_operations._normalize_relevance_matrix(raw)
+        self.assertNotIn('evaluations',normalized)
+        self.assertEqual(normalized['matrix'],[{
+            'source_id':evaluation['source_id'],
+            'evidence_id':evaluation['evidence_id'],
+            'dimensions':{key:evaluation[key] for key in research_agents.DIMENSIONS},
+            'overall_relation':evaluation['overall_relation'],
+            'basis':evaluation['basis'],
+        }])
+        self.assertEqual(normalized['matrix_structure_origin'],
+                         research_agents.RELEVANCE_MATRIX_STRUCTURE_ORIGIN)
+        self.assertEqual(normalized['matrix_structure_policy'],
+                         research_agents.RELEVANCE_MATRIX_STRUCTURE_POLICY)
+        checked=research_agents.validate_agent_output('relevance_evaluator',normalized)
+        self.assertEqual(checked['matrix'],normalized['matrix'])
+        self.assertEqual(raw,{'evaluations':[evaluation],'usage_events':[]})
+
+    def test_relevance_matrix_rejects_ambiguous_or_incomplete_shapes(self):
+        valid=self._flat_relevance_evaluation()
+        malformed_values=(None,'text',17,True,{'row-1':valid},{'source_id':'s'})
+        for malformed in malformed_values:
+            with self.subTest(matrix=malformed):
+                with self.assertRaisesRegex(research_agents.AgentOutputError,
+                        'no devolvió una matriz estructurada'):
+                    research_operations._normalize_relevance_matrix(
+                        {'matrix':malformed,'evaluations':[dict(valid)]})
+
+        missing_dimension=dict(valid);missing_dimension.pop('horizon')
+        invalid_dimension=dict(valid);invalid_dimension['horizon']='maybe'
+        missing_id=dict(valid);missing_id['source_id']=' '
+        missing_evidence=dict(valid);missing_evidence.pop('evidence_id')
+        conflicting_nested={**valid,'dimensions':{key:'supports' for key in research_agents.DIMENSIONS}}
+        no_rows={'evaluations':[]}
+        non_list={'evaluations':valid}
+        for malformed in (missing_dimension,invalid_dimension,missing_id,missing_evidence,
+                          conflicting_nested):
+            with self.subTest(evaluation=malformed):
+                with self.assertRaisesRegex(research_agents.AgentOutputError,
+                        'no devolvió una matriz estructurada'):
+                    research_operations._normalize_relevance_matrix({'evaluations':[malformed]})
+        for malformed in (no_rows,non_list,{'unexpected':[]},
+                          {'evaluations':[dict(valid,extra_relation='supports')]}):
+            with self.subTest(envelope=malformed):
+                with self.assertRaises(research_agents.AgentOutputError):
+                    research_operations._normalize_relevance_matrix(malformed)
+
+    def test_relevance_validator_rejects_noncanonical_dimensions_and_relations(self):
+        base={'source_id':'s','evidence_id':'e',
+              'dimensions':{key:'unreported' for key in research_agents.DIMENSIONS},
+              'overall_relation':'unreported','basis':'Fixture.'}
+        invalid_rows=[]
+        missing_dimension=dict(base);missing_dimension['dimensions']=dict(base['dimensions']);missing_dimension['dimensions'].pop('horizon')
+        extra_dimension=dict(base);extra_dimension['dimensions']={**base['dimensions'],'other':'unreported'}
+        invalid_dimension=dict(base);invalid_dimension['dimensions']={**base['dimensions'],'horizon':'maybe'}
+        invalid_dimension_type=dict(base);invalid_dimension_type['dimensions']={**base['dimensions'],'horizon':None}
+        invalid_overall=dict(base,overall_relation='maybe')
+        missing_overall=dict(base);missing_overall.pop('overall_relation')
+        missing_basis=dict(base);missing_basis.pop('basis')
+        missing_source=dict(base);missing_source.pop('source_id')
+        missing_evidence=dict(base);missing_evidence.pop('evidence_id')
+        invalid_rows.extend((missing_dimension,extra_dimension,invalid_dimension,
+                             invalid_dimension_type,invalid_overall,missing_overall,
+                             missing_basis,missing_source,missing_evidence))
+        for row in invalid_rows:
+            with self.subTest(row=row):
+                with self.assertRaises(research_agents.AgentOutputError):
+                    research_agents.validate_agent_output('relevance_evaluator',{'matrix':[row]})
+        for provenance in (
+                {'matrix_structure_origin':'wrapper_flat_evaluations'},
+                {'matrix_structure_origin':None,'matrix_structure_policy':None}):
+            with self.subTest(provenance=provenance):
+                with self.assertRaisesRegex(research_agents.AgentOutputError,'provenance'):
+                    research_agents.validate_agent_output('relevance_evaluator',
+                        {'matrix':[base],**provenance})
+        with self.assertRaisesRegex(research_agents.AgentOutputError,'procedencia de normalización'):
+            research_operations._normalize_relevance_matrix({
+                'evaluations':[self._flat_relevance_evaluation()],
+                'matrix_structure_policy':research_agents.RELEVANCE_MATRIX_STRUCTURE_POLICY,
+                'matrix_structure_origin':research_agents.RELEVANCE_MATRIX_STRUCTURE_ORIGIN,
+            })
+
+    def test_relevance_failure_preserves_raw_and_retry_emits_one_canonical_checkpoint(self):
+        attempts={'count':0}
+        evaluation=self._flat_relevance_evaluation()
+        malformed={'matrix':{'ambiguous':'not a row'},'evaluations':[dict(evaluation)],'usage_events':[]}
+        valid={'evaluations':[dict(evaluation)],'usage_events':[]}
+        downstream={}
+        def provider(call):
+            if call.role=='relevance_evaluator':
+                attempts['count']+=1
+                return malformed if attempts['count']==1 else valid
+            if call.role in {'skeptic','final_auditor'}:
+                downstream[call.role]=call.payload['support_matrix']['matrix']
+                if call.role=='skeptic':
+                    return {'verdict':'UNSUPPORTED','rationale':'Fixture only.',
+                            'contradiction_search':'No provider was used.',
+                            'support_source_ids':[]}
+                return {'decision':'continue','explanation':'Fixture only.','errors':[],
+                        'unresolved_dimensions':[],'indeterminacy_criteria':[]}
+            raise AssertionError(call.role)
+
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            operation=store.create('case','claim','A synthetic compound claim')
+            engine=research_operations.ResearchOrchestrator(store,provider)
+            profile=research_operations.ROUNDS[0]
+            first_budget=research_operations.BudgetLedger(0,clock=lambda:0)
+            first_budget.begin_round(profile)
+            first_budget.observe({'type':'query','query':'preexisting query'})
+            first_budget.observe({'type':'page','url':'https://example.org/preexisting'})
+            before=(set(first_budget.queries),set(first_budget.pages))
+            with self.assertRaisesRegex(research_agents.AgentOutputError,
+                    'La evaluación de pertinencia no devolvió una matriz estructurada'):
+                engine._call(operation,'relevance_evaluator',{'sources':{'sources':[]}},
+                             first_budget,profile)
+            artifacts=store.folder(operation['operation_id'])/'artifacts'
+            raw_files=list((artifacts/'raw-agent-output').glob('*.json'))
+            self.assertEqual(len(raw_files),1)
+            raw=json.loads(raw_files[0].read_text(encoding='utf-8'))
+            self.assertFalse(raw['canonical'])
+            self.assertEqual(raw['value']['result'],malformed)
+            self.assertEqual((set(first_budget.queries),set(first_budget.pages)),before)
+            self.assertEqual(list((artifacts/'agent-results').glob('*.json')),[])
+
+            retry_budget=research_operations.BudgetLedger(0,clock=lambda:0)
+            retry_budget.begin_round(profile)
+            retry_budget.observe({'type':'query','query':'preexisting query'})
+            retry_budget.observe({'type':'page','url':'https://example.org/preexisting'})
+            canonical=engine._call(operation,'relevance_evaluator',{'sources':{'sources':[]}},
+                                   retry_budget,profile)
+            self.assertEqual(attempts['count'],2)
+            self.assertEqual(canonical['matrix'][0]['source_id'],evaluation['source_id'])
+            self.assertEqual(canonical['matrix'][0]['evidence_id'],evaluation['evidence_id'])
+            self.assertEqual((set(retry_budget.queries),set(retry_budget.pages)),before)
+            canonical_files=list((artifacts/'agent-results').glob('*.json'))
+            self.assertEqual(len(canonical_files),1)
+            checkpoint=json.loads(canonical_files[0].read_text(encoding='utf-8'))
+            self.assertTrue(checkpoint['canonical'])
+            self.assertEqual(checkpoint['value']['result']['matrix'],canonical['matrix'])
+
+            reuse_budget=research_operations.BudgetLedger(0,clock=lambda:0)
+            reuse_budget.begin_round(profile)
+            reuse_budget.observe({'type':'query','query':'preexisting query'})
+            reuse_budget.observe({'type':'page','url':'https://example.org/preexisting'})
+            reused=engine._call(operation,'relevance_evaluator',{'sources':{'sources':[]}},
+                                reuse_budget,profile)
+            self.assertEqual(attempts['count'],2)
+            self.assertEqual(reused['matrix'],canonical['matrix'])
+            self.assertEqual((set(reuse_budget.queries),set(reuse_budget.pages)),before)
+            reuse_files=list((artifacts/'checkpoint-reuse').glob('*.json'))
+            self.assertTrue(reuse_files)
+            self.assertEqual(len(list((artifacts/'agent-results').glob('*.json'))),1)
+
+            engine._call(operation,'skeptic',{'support_matrix':canonical},retry_budget,profile)
+            engine._call(operation,'final_auditor',{'support_matrix':canonical},retry_budget,profile)
+            for role in ('skeptic','final_auditor'):
+                self.assertIsInstance(downstream[role],list)
+                self.assertEqual(downstream[role],canonical['matrix'])
+
     def test_documents_only_uses_local_retrieval_without_locator_or_web_retriever(self):
         provider=FakeProvider()
         with tempfile.TemporaryDirectory() as temp:
@@ -58,6 +271,12 @@ class AutomaticResearchTests(unittest.TestCase):
             self.assertNotIn('locator',[call.role for call in provider.calls])
             self.assertNotIn('retriever',[call.role for call in provider.calls])
             self.assertEqual(result['result']['scientific_resolution']['evidence_mode'],'documents_only')
+            artifacts=store.folder(op['operation_id'])/'artifacts'
+            claim_passage=json.loads(next((artifacts/'claim-passage-matrix').glob('*.json')).read_text(encoding='utf-8'))
+            rows=claim_passage['value']['matrix']
+            self.assertTrue(rows)
+            self.assertTrue(all('dimensions' in row for row in rows))
+            self.assertTrue(all('evaluations' not in row for row in rows))
 
     def test_operation_modes_are_validated_and_fingerprinted(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -67,6 +286,119 @@ class AutomaticResearchTests(unittest.TestCase):
             first=store.create('case','claim','claim',evidence_mode='documents_only',document_ids=['doc-a'])
             second=store.create('case','claim','claim',evidence_mode='documents_plus_search',document_ids=['doc-a'])
             self.assertNotEqual(first['input_fingerprint'],second['input_fingerprint'])
+
+    def test_create_with_id_creates_final_folder_without_directory_rename(self):
+        operation_id='12c609c2320b472484eb780e9419d21a'
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'.project-intelligence/claim-research')
+            def denied_rename(_self,*_args,**_kwargs):
+                raise PermissionError('directory rename is forbidden in this regression test')
+            with patch.object(Path,'replace',denied_rename), patch.object(Path,'rename',denied_rename):
+                record=store.create_with_id(operation_id,'case','claim','A synthetic question')
+            final=store.root/operation_id
+            self.assertTrue(final.is_dir())
+            self.assertEqual([path.name for path in store.root.iterdir()],[operation_id])
+            self.assertEqual(record['operation_id'],operation_id)
+            saved_operation=json.loads((final/'operation.json').read_text(encoding='utf-8'))
+            saved_input=json.loads((final/'input.json').read_text(encoding='utf-8'))
+            self.assertEqual(saved_operation['operation_id'],operation_id)
+            self.assertEqual(saved_input['operation_id'],operation_id)
+            self.assertEqual(saved_operation['input_fingerprint'],saved_input['input_fingerprint'])
+
+    def test_create_with_id_is_idempotent_and_preserves_artifacts_and_checkpoints(self):
+        operation_id='bee3a1b837bb4186b3c3f59b740fc57b'
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            first=store.create_with_id(operation_id,'case','claim','A synthetic claim')
+            failed=store.update(operation_id,status='failed',stage='failed',
+                error={'type':'fixture','message':'retain'},updated_at='fixed-timestamp')
+            artifact=store.artifact(operation_id,'agent-results',{'role':'planner','result':{'ok':True}})
+            checkpoint=store.folder(operation_id)/artifact['path']
+            before=(checkpoint.read_bytes(),(store.folder(operation_id)/'operation.json').read_bytes(),
+                    (store.folder(operation_id)/'input.json').read_bytes())
+            second=store.create_with_id(operation_id,'different-case','different-claim','changed input',
+                evidence_mode='invalid')
+            after=(checkpoint.read_bytes(),(store.folder(operation_id)/'operation.json').read_bytes(),
+                   (store.folder(operation_id)/'input.json').read_bytes())
+            self.assertEqual(second,failed)
+            self.assertEqual(second['operation_id'],first['operation_id'])
+            self.assertEqual(after,before)
+
+    def test_create_with_id_concurrent_duplicate_converges_without_mixing(self):
+        operation_id='e'*32
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results=list(pool.map(lambda claim:store.create_with_id(operation_id,'case','claim',claim),
+                                      ('claim A','claim B')))
+            self.assertEqual([row['operation_id'] for row in results],[operation_id,operation_id])
+            saved=json.loads((store.folder(operation_id)/'operation.json').read_text(encoding='utf-8'))
+            input_record=json.loads((store.folder(operation_id)/'input.json').read_text(encoding='utf-8'))
+            self.assertIn(saved['claim'],('claim A','claim B'))
+            self.assertEqual(input_record['claim'],saved['claim'])
+            self.assertEqual([path.name for path in store.root.iterdir()],[operation_id])
+
+    def test_incomplete_existing_operation_folder_is_preserved_and_not_reinitialized(self):
+        operation_id='f'*32
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            folder=store.folder(operation_id);folder.mkdir(parents=True)
+            marker=folder/'artifacts'/'existing.bin';marker.parent.mkdir();marker.write_bytes(b'keep')
+            with patch.object(research_operations.time,'monotonic',side_effect=[0,3]), \
+                    patch.object(research_operations.time,'sleep'):
+                with self.assertRaisesRegex(research_operations.OperationConflict,'no contiene una operación completa'):
+                    store.create_with_id(operation_id,'case','claim','claim')
+            self.assertEqual(marker.read_bytes(),b'keep')
+            self.assertFalse((folder/'input.json').exists())
+            self.assertFalse((folder/'operation.json').exists())
+
+    def test_create_with_id_preserves_all_evidence_modes_and_authorized_document_ids(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            modes=(('a'*32,'question_search',[]),
+                   ('b'*32,'documents_only',['authorized-doc']),
+                   ('c'*32,'documents_plus_search',['authorized-doc']))
+            for operation_id,mode,document_ids in modes:
+                with self.subTest(mode=mode):
+                    record=store.create_with_id(operation_id,'case','claim','Question',
+                        evidence_mode=mode,document_ids=document_ids,claim_version='claim-v4')
+                    input_record=json.loads((store.folder(operation_id)/'input.json').read_text(encoding='utf-8'))
+                    self.assertEqual(record['evidence_mode'],mode)
+                    self.assertEqual(record['document_ids'],document_ids)
+                    self.assertEqual(record['claim_version'],'claim-v4')
+                    self.assertEqual(input_record['evidence_mode'],mode)
+                    self.assertEqual(input_record['document_ids'],document_ids)
+                    self.assertEqual(input_record['claim_version'],'claim-v4')
+
+    def test_failed_claim_research_retry_keeps_final_id_and_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);case_folder=root/'case';case_folder.mkdir()
+            library.save(case_folder/'claims.json',[{'id':'claim','claim':'A synthetic claim','status':'UNSUPPORTED'}])
+            first_id='d'*32
+            calls=[]
+            class FailAfterPlanner(FakeProvider):
+                def __call__(self,call):
+                    calls.append(call.role)
+                    if call.role=='formulation_reviewer':raise ValueError('synthetic failure after planner checkpoint')
+                    return super().__call__(call)
+            with patch.object(library,'case_path',return_value=case_folder):
+                failed=research_operations.run_claim_research(root,'case','claim',operation_id=first_id,
+                    evidence_mode='documents_plus_search',document_ids=['authorized-doc'],provider=FailAfterPlanner())
+                self.assertEqual(failed['status'],'failed')
+                store=research_operations.store(root)
+                agent_results=store.folder(first_id)/'artifacts'/'agent-results'
+                planner_artifacts=[path for path in agent_results.glob('*.json')
+                    if json.loads(path.read_text(encoding='utf-8'))['value']['manifest']['agent']=='planner']
+                self.assertEqual(len(planner_artifacts),1)
+                retry_provider=FakeProvider()
+                finished=research_operations.run_claim_research(root,'case','claim',operation_id=first_id,
+                    evidence_mode='documents_plus_search',document_ids=['authorized-doc'],provider=retry_provider)
+            self.assertEqual(finished['operation_id'],first_id)
+            self.assertEqual(calls.count('planner'),1)
+            self.assertNotIn('planner',[call.role for call in retry_provider.calls])
+            planner_after=[path for path in (store.folder(first_id)/'artifacts'/'agent-results').glob('*.json')
+                if json.loads(path.read_text(encoding='utf-8'))['value']['manifest']['agent']=='planner']
+            self.assertEqual(len(planner_after),1)
 
     def test_shared_source_flags_other_conclusions_without_revising_them(self):
         with tempfile.TemporaryDirectory() as temp:
