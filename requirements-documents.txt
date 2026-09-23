@@ -1,0 +1,4 @@
+# Optional document environment. The application core stays standard-library only.
+docling==2.129.0
+pypdf==6.19.0
+psutil==7.2.2

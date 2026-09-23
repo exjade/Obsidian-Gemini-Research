@@ -60,7 +60,20 @@ class SourceTests(unittest.TestCase):
                 with patch.object(sc,'inspect',lambda u,e:real_inspect(u,e,lambda _:page())):
                     receipt=sc.record_check(evidence,directory)
             evidence['source_check_id']=receipt['id']
-            self.assertTrue(sc.trusted(evidence,directory)['eligible'])
+            trusted=sc.trusted(evidence,directory)
+            self.assertTrue(trusted['eligible'])
+            self.assertEqual(trusted['snapshot_metadata_policy'],'source-snapshot-metadata-v1')
+            self.assertEqual(trusted['normalized_final_url'],'example.org/article')
+            self.assertEqual(trusted['persistent_identifiers'],[])
+            self.assertNotIn('semantic_support',trusted)
+            assertions=sc.trusted_metadata(evidence,directory)
+            self.assertIn(('title','Article','source_check.page_title'),
+                          {(a['field'],a['value'],a['provenance']) for a in assertions})
+            self.assertIn(('final_url','https://example.org/article','source_check.final_url'),
+                          {(a['field'],a['value'],a['provenance']) for a in assertions})
+            self.assertIn(('normalized_final_url','example.org/article','source_check.normalized_final_url'),
+                          {(a['field'],a['value'],a['provenance']) for a in assertions})
+            self.assertEqual(sc.trusted_metadata({**evidence,'excerpt':'changed'},directory),[])
             self.assertTrue(sc.latest(evidence,directory)['eligible'])
             self.assertIsNone(sc.trusted({**evidence,'excerpt':'invented'},directory))
             claim={'evidence':[dict(evidence)],'status':'VERIFIED','domain':'general','sensible':False,'favorable':False,'skeptic_note':'fixture','primary_sources':[{'evidence_index':0,'independence_group':'original','reason':'fixture'}]}
@@ -73,6 +86,22 @@ class SourceTests(unittest.TestCase):
             (directory/(receipt['id']+'.bin')).write_bytes(b'tampered')
             self.assertIsNone(sc.trusted(evidence,directory))
 
+    def test_merged_persistent_identifier_provenance_is_neutral(self):
+        evidence={'type':'external','url':'https://pubmed.ncbi.nlm.nih.gov/12345','excerpt':EXCERPT}
+        with tempfile.TemporaryDirectory() as td:
+            directory=Path(td)/'source-checks';real_inspect=sc.inspect
+            final='https://example.org/article/10.9876/final-doi'
+            result={'final_url':final,'http_status':200,'content_type':'text/html','content_encoding':'identity',
+                    'redirects':[],'body':('<html><title>Article</title><p>'+EXCERPT+'</p></html>').encode(),'truncated':False}
+            with patch.object(sc,'inspect',lambda u,e:real_inspect(u,e,lambda _:result)):
+                receipt=sc.record_check(evidence,directory)
+            evidence['source_check_id']=receipt['id']
+            assertions=sc.trusted_metadata(evidence,directory)
+            identifiers=[a for a in assertions if a['field'] in ('doi','pmid','pmcid')]
+            self.assertEqual({(a['field'],a['value']) for a in identifiers},
+                             {('pmid','12345'),('doi','10.9876/final-doi')})
+            self.assertEqual({a['provenance'] for a in identifiers},{'source_check.persistent_identifier'})
+
     def test_four_pass_external_gate(self):
         import copy
         evidence={'type':'external','url':'https://example.org/article','excerpt':EXCERPT,'primary':True,'official':True,'primary_kind':'official_documentation','searched':True,'fetched':True,'retrieved_at':'2026-09-18T00:00:00Z'}
@@ -81,10 +110,14 @@ class SourceTests(unittest.TestCase):
             run_id='fixture-run'
             def call(self,stage,instructions,data):
                 if stage=='pass2':return [{'id':candidate['id'],'claim':candidate['claim'],'status':'UNVERIFIED','evidence':[copy.deepcopy(evidence)]}]
-                if stage=='pass3':return [{**copy.deepcopy(data[0]),'status':'VERIFIED','domain':'general','sensible':False,'favorable':False,'skeptic_note':'fixture review','contradiction_search':'fixture search','primary_sources':[{'evidence_index':0,'independence_group':'original','reason':'fixture'}]}]
+                if stage=='pass3':
+                    reviewed=copy.deepcopy(data[0])
+                    reviewed['evidence'][0]['semantic_review']={'target_claim_id':candidate['id'],'decision':'support','basis':'fixture exact passage support','limits':'','reviewer':'pass3'}
+                    return [{**reviewed,'status':'VERIFIED','domain':'general','sensible':False,'favorable':False,'skeptic_note':'fixture review','contradiction_search':'fixture search','primary_sources':[{'evidence_index':0,'independence_group':'original','reason':'fixture'}]}]
                 if stage=='pass4':return [{'id':candidate['id'],'text':'fixture published paragraph'}]
                 raise AssertionError(stage)
-        with tempfile.TemporaryDirectory() as td,patch.object(pipeline,'INTEL',Path(td)):
+        with tempfile.TemporaryDirectory() as td,patch.object(pipeline,'INTEL',Path(td)),patch.object(pipeline,'ROOT',Path(td)):
+            (Path(td)/'GEMINI.md').write_text('fixture contract',encoding='utf-8')
             real_inspect=sc.inspect
             for status,expected in [(200,'VERIFIED'),(404,'UNSUPPORTED')]:
                 with patch.object(sc,'inspect',lambda u,e:real_inspect(u,e,lambda _:page(status))):

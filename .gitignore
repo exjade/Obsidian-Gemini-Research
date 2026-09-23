@@ -1,5 +1,6 @@
 # Local research, evidence, uploads, logs, state and machine configuration.
 /.project-intelligence/
+/pdfs/
 /docs/architecture.md
 /docs/research.md
 /docs/changelog/*
@@ -10,6 +11,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-documents/
 venv/
 .env
 .env.*

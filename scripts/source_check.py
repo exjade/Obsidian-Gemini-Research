@@ -12,6 +12,7 @@ import ssl
 import unicodedata
 import uuid
 from urllib.parse import urlsplit, urljoin
+import source_identity
 
 POLICY = 'public-get-excerpt-v1'
 MAX_BYTES = 524288
@@ -81,6 +82,11 @@ def inspect(url, excerpt, transport=fetch):
     try:
         result=transport(url);body=result.pop('body');record.update(result)
         record['body_sha256']=hashlib.sha256(body).hexdigest()
+        record['snapshot_metadata_policy']='source-snapshot-metadata-v1'
+        record['normalized_final_url']=source_identity.canonical_url(record['final_url'])
+        record['persistent_identifiers']=sorted(set(filter(None,(
+            source_identity.url_identifier(record['original_url']),
+            source_identity.url_identifier(record['final_url'])))))
         status=result['http_status']
         if status in (404,410):record['availability']='NOT_FOUND'
         elif status in (401,403,429):record['availability']='RESTRICTED'
@@ -132,6 +138,31 @@ def trusted(evidence,directory):
         if record['snapshot_sha256']!=hashlib.sha256(snapshot).hexdigest():return None
         return record
     except (OSError,ValueError,KeyError):return None
+
+def trusted_metadata(evidence,directory):
+    """Export metadata assertions only from the receipt bound to this evidence."""
+    record=trusted(evidence,directory)
+    if not record:return []
+    from source_metadata import assertion
+    ident=record.get('id','')
+    timestamp=record.get('checked_at','')
+    assertions=[]
+    for field,value,provenance,status in (
+        ('original_url',record.get('original_url'),'source_check.original_url','observed'),
+        ('final_url',record.get('final_url'),'source_check.final_url','observed'),
+        ('normalized_final_url',record.get('normalized_final_url'),'source_check.normalized_final_url','observed'),
+        ('title',record.get('page_title'),'source_check.page_title','observed'),
+        ('content_type',record.get('content_type'),'source_check.content_type','observed'),
+        ('snapshot_sha256',record.get('body_sha256'),'source_check.body_sha256','observed')):
+        item=assertion(field,value,provenance,status,timestamp,ident)
+        if item:assertions.append(item)
+    for identifier in record.get('persistent_identifiers',[]):
+        if ':' not in identifier:continue
+        field,value=identifier.split(':',1)
+        if field in ('doi','pmid','pmcid'):
+            item=assertion(field,value,'source_check.persistent_identifier','observed',timestamp,ident)
+            if item:assertions.append(item)
+    return assertions
 
 def key(e):
     return hashlib.sha256((e['url']+'\n'+e.get('excerpt','')).encode()).hexdigest()
