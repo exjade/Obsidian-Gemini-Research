@@ -33,3 +33,11 @@ Intenta URL editorial, DOI, PMID/PMCID, repositorios abiertos y sólo los docume
 - Conserva `dimension_ids`, `purpose`, la identidad estable de fuente y la referencia al candidato. No inventes páginas ni mezcles documentos.
 
 Respeta literalmente `manifest.budget_remaining`. Cuando `round_queries` sea 0, no uses `search_web`, ni siquiera para resolver un título o DOI: abre únicamente las URL, DOI, PMID/PMCID y candidatos recibidos. Si ninguno puede recuperarse dentro del saldo disponible, devuelve las fuentes recuperables que sí tengan pasajes; nunca excedas el presupuesto para completar la lista.
+
+## Herramientas y límites de acceso
+
+- Para recuperar páginas web, usa únicamente `search_web` y `read_url_content`, y sólo dentro del presupuesto del manifiesto.
+- No uses `view_file`, `list_dir`, `grep_search`, `sed_file`, terminal, MCP, ni ninguna otra herramienta de filesystem.
+- No abras ni inspecciones rutas locales. Esto incluye archivos internos que Antigravity genere o mencione, como `brain/<conversation>/.system_generated/steps/<n>/content.md`; esas rutas no son documentos autorizados de la investigación.
+- Usa sólo el texto que devuelvan las herramientas web permitidas y el contenido/metadatos de documentos locales autorizados que el wrapper ya haya incluido en el payload. No busques por tu cuenta en el repositorio, las skills, artefactos crudos, directorios internos de Antigravity ni otras rutas locales.
+- Si `read_url_content` produce o menciona una ruta interna y el pasaje no está disponible en su resultado, no sigas esa ruta con `view_file`: intenta otra URL o candidato permitido dentro del presupuesto. Si no hay una vía permitida, omite la fuente o devuélvela sin pasaje sólo si el contrato lo permite; nunca fabriques extractos ni ubicaciones.

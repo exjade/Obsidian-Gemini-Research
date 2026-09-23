@@ -161,7 +161,10 @@ class Runner:
         if specialized:
             if role in ('locator', 'retriever'):
                 tool_policy = ('Sólo puedes usar search_web y read_url_content cuando el saldo del manifiesto lo permita. '
-                               'No uses MCP, terminal, archivos locales ni otros agentes. ')
+                               'No uses view_file, list_dir, grep_search, sed_file, terminal, MCP, filesystem ni otros agentes. '
+                               'No abras rutas locales, ni siquiera archivos internos de Antigravity como '
+                               'brain/<conversation>/.system_generated/steps/<n>/content.md; esa ruta no es un documento autorizado. '
+                               'Usa únicamente el contenido devuelto por read_url_content y los documentos/candidatos ya incluidos en DATOS. ')
             else:
                 tool_policy = ('No uses herramientas de ningún tipo: no MCP, búsqueda web, lectura de URL, terminal, '
                                'archivos ni otros agentes. Todo lo necesario está en DATOS. ')

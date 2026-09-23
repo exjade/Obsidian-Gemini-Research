@@ -19,6 +19,8 @@ ROLES = (
 )
 DIMENSIONS = ("intervention", "spacing", "comparison", "population", "material", "outcome", "horizon")
 RELATIONS = {"supports", "contradicts", "mismatch", "unreported"}
+RELEVANCE_MATRIX_STRUCTURE_POLICY = "relevance-matrix-normalization-v1"
+RELEVANCE_MATRIX_STRUCTURE_ORIGIN = "wrapper_flat_evaluations"
 IDENTITY_STATUSES = {"confirmed", "uncertain"}
 CREDIBILITY_STATUSES = {"credible", "uncertain", "not_credible"}
 PRIMARY_STATUSES = {"confirmed_primary", "declared_primary", "secondary", "uncertain"}
@@ -153,16 +155,26 @@ def validate_agent_output(role: str, value: Any) -> dict[str, Any]:
             for key in ("credibility_basis","primary_basis","independence_basis"):
                 _text(row.get(key),f"source_evaluator.{key}")
     elif role == "relevance_evaluator":
+        structure_policy = data.get("matrix_structure_policy")
+        structure_origin = data.get("matrix_structure_origin")
+        if "matrix_structure_policy" in data or "matrix_structure_origin" in data:
+            if (structure_policy != RELEVANCE_MATRIX_STRUCTURE_POLICY
+                    or structure_origin != RELEVANCE_MATRIX_STRUCTURE_ORIGIN):
+                raise AgentOutputError("relevance_evaluator provenance de normalización es inválida.")
         rows = _list(data.get("matrix"), "relevance_evaluator.matrix")
         for index, row in enumerate(rows):
             row = _mapping(row, f"matrix[{index}]")
             _source_id(row, f"matrix[{index}]")
             _text(row.get("evidence_id"), f"matrix[{index}].evidence_id")
             dimensions = _mapping(row.get("dimensions"), f"matrix[{index}].dimensions")
+            if set(dimensions) != set(DIMENSIONS):
+                raise AgentOutputError("relevance_evaluator.dimensions debe contener exactamente las siete dimensiones requeridas.")
             for key in DIMENSIONS:
-                if dimensions.get(key) not in RELATIONS:
+                value = dimensions.get(key)
+                if not isinstance(value, str) or value not in RELATIONS:
                     raise AgentOutputError(f"Relación inválida para {key}.")
-            if row.get("overall_relation") not in RELATIONS:
+            overall_relation = row.get("overall_relation")
+            if not isinstance(overall_relation, str) or overall_relation not in RELATIONS:
                 raise AgentOutputError("relevance_evaluator.overall_relation es inválida.")
             _text(row.get("basis"),f"matrix[{index}].basis")
     elif role == "skeptic":
