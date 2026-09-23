@@ -102,16 +102,18 @@ def operation_update(operation_id, **changes):
         return operation_write(record)
 
 
-def operation_start(kind,case_id,claim_id=None):
+def operation_start(kind,case_id,claim_id=None,input_data=None):
     """Create one durable operation and coalesce repeated clicks while it runs."""
     with OPERATION_LOCK:
         directory=operation_directory();directory.mkdir(parents=True,exist_ok=True)
         previous=[]
         for path in directory.glob('*.json'):
             current=read_json(path,{})
-            if (current.get('kind'),current.get('case_id'),current.get('claim_id'))==(kind,case_id,claim_id) and current.get('status') in ('queued','running'):
+            fingerprint=hashlib.sha256(json.dumps(input_data or {},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+            same=(current.get('input_fingerprint') or hashlib.sha256(b'{}').hexdigest())==fingerprint
+            if same and (current.get('kind'),current.get('case_id'),current.get('claim_id'))==(kind,case_id,claim_id) and current.get('status') in ('queued','running'):
                 return current,False
-            if (current.get('kind'),current.get('case_id'),current.get('claim_id'))==(kind,case_id,claim_id):
+            if same and (current.get('kind'),current.get('case_id'),current.get('claim_id'))==(kind,case_id,claim_id):
                 previous.append(current)
         # Automatic research is checkpointed. Reuse the most recent failed
         # operation id so completed agents, searches and retrieved pages are
@@ -132,6 +134,7 @@ def operation_start(kind,case_id,claim_id=None):
                               updated_at=utcnow(),finished_at=None)
                 return operation_write(record),True
         now=utcnow();record={'id':uuid.uuid4().hex,'kind':kind,'case_id':case_id,'claim_id':claim_id,
+            'input_data':input_data or {},'input_fingerprint':hashlib.sha256(json.dumps(input_data or {},sort_keys=True,ensure_ascii=False).encode()).hexdigest(),
             'status':'queued','stage':'En espera','progress':{'current':0,'total':0},
             'requested_at':now,'updated_at':now,'result':None,'error':None}
         return operation_write(record),True
@@ -283,7 +286,11 @@ def _call_research_function(function,case_id,claim_id,operation_id):
         if isinstance(value,dict):changes={**value,**changes}
         allowed={k:v for k,v in changes.items() if k in ('stage','progress','result','error','status')}
         if allowed:operation_update(operation_id,**allowed)
+    op=operation_read(operation_id) or {};inputs=op.get('input_data') or {}
     available={'root':ROOT,'project_root':ROOT,'case_id':case_id,'claim_id':claim_id,
+               'evidence_mode':inputs.get('evidence_mode','question_search'),
+               'document_ids':inputs.get('document_ids',[]),
+               'claim_version':inputs.get('claim_version',1),
                'operation_id':operation_id,'update':progress,'progress':progress,'callback':progress}
     signature=inspect.signature(function)
     kwargs={name:available[name] for name in signature.parameters if name in available}
@@ -508,6 +515,13 @@ class Handler(BaseHTTPRequestHandler):
             if self.path=='/api/scope':
                 with LOCK:
                     if JOB['status']=='running' or (INTEL/'pipeline.lock').exists():return self.respond({'error':'Espera a que termine la ejecución activa'},409)
+                    if data.get('action')=='propose_reformulation':
+                        proposal=research_scope.propose_reformulation(data.get('case_id',''),data.get('claim_id',''),
+                            data.get('revised_claim',''),data.get('dimension_ids',[]),data.get('reason',''),data.get('actor','usuario local'))
+                        return self.respond({'ok':True,'proposal':proposal,'research_started':False})
+                    if data.get('action')=='approve_reformulation':
+                        child=research_scope.approve_reformulation(data.get('case_id',''),data.get('proposal_id',''),data.get('actor','usuario local'))
+                        return self.respond({'ok':True,'claim':child,'research_started':False})
                     if data.get('action')=='add_candidate':
                         candidate=research_scope.add_candidate(data.get('case_id',''),data.get('claim'),data.get('reason'))
                         return self.respond({'ok':True,'candidate':candidate,'research_started':False})
@@ -573,10 +587,25 @@ class Handler(BaseHTTPRequestHandler):
                 rows=library.read(folder/'claims.json',None)
                 if rows is None:raise ValueError('Expediente inexistente')
                 if not any(c.get('id')==claim_id for c in rows):raise ValueError('Afirmación inexistente')
+                evidence_mode=data.get('evidence_mode','question_search')
+                document_ids=data.get('document_ids',[])
+                if evidence_mode not in ('question_search','documents_only','documents_plus_search'):
+                    raise ValueError('Modo de evidencia inválido')
+                if not isinstance(document_ids,list) or any(not isinstance(ident,str) for ident in document_ids):
+                    raise ValueError('Selección de documentos inválida')
+                if evidence_mode=='question_search' and document_ids:raise ValueError('La búsqueda desde pregunta no admite documentos seleccionados')
+                if evidence_mode!='question_search' and not document_ids:raise ValueError('Selecciona al menos un PDF local')
+                for ident in set(document_ids):
+                    record=documents.authorized(ROOT,cid,ident)
+                    if not record.get('active_extraction'):
+                        raise ValueError('Prepara el texto del PDF seleccionado antes de iniciar la investigación')
+                inputs={'evidence_mode':evidence_mode,'document_ids':sorted(set(document_ids)),
+                        'claim_sha256':hashlib.sha256(next(c['claim'] for c in rows if c['id']==claim_id).encode()).hexdigest(),
+                        'claim_version':next((c.get('claim_version',1) for c in rows if c['id']==claim_id),1)}
                 with LOCK:
                     if JOB['status']=='running' or (INTEL/'pipeline.lock').exists():
                         return self.respond({'error':'Espera a que termine la ejecución activa'},409)
-                    operation,created=operation_start('claim_research',cid,claim_id)
+                    operation,created=operation_start('claim_research',cid,claim_id,inputs)
                     if created:JOB.update(status='running',log='',stage='Preparando investigación automática',case_id=cid,operation_id=operation['id'])
                 if created:threading.Thread(target=automatic_claim_research,args=(cid,claim_id,operation['id']),daemon=True).start()
                 return self.respond({'operation_id':operation['id'],'kind':'claim_research','deduplicated':not created})

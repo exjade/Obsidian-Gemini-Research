@@ -102,4 +102,19 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(rows[:2],self.rows)
         with self.assertRaises(ValueError):scope.add_candidate('case',candidate['claim'],'Duplicate')
 
+    def test_narrow_reformulation_is_a_new_version_without_inherited_evidence_or_verdict(self):
+        parent=copy.deepcopy(self.rows[0]);parent['status']='VERIFIED'
+        parent['evidence']=[{'type':'document','excerpt':'historical text'}]
+        self.rows[0]=parent;lib.save(self.folder/'claims.json',self.rows)
+        lib.save(self.root/'.project-intelligence/claims/architecture.json',self.rows)
+        proposal=scope.propose_reformulation('case','a','A retrieval practice can improve delayed recall in adults.',
+            ['intervention','population','horizon'],'Removed the broad comparison and complex-content generalization.')
+        self.assertEqual(lib.read(self.folder/'claims.json')[0],parent)
+        child=scope.approve_reformulation('case',proposal['id'])
+        saved=lib.read(self.folder/'claims.json')
+        self.assertEqual(saved[0],parent);self.assertEqual(child['parent_claim_id'],'a')
+        self.assertEqual(child['status'],'UNVERIFIED');self.assertEqual(child['evidence'],[])
+        self.assertFalse(child['verdict_inherited']);self.assertFalse(child['evidence_inherited'])
+        self.assertEqual(lib.read(self.folder/'case.json')['claim_reformulation_history'][-1]['status'],'approved')
+
 if __name__=='__main__':unittest.main()

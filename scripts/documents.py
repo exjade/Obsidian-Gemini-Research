@@ -175,14 +175,17 @@ def extraction_data(root, ident, xid):
     return library.read(out / 'document.json'), library.read(out / 'chunks.json')
 
 
-def retrieve(root, case_id, query, claim_id=None, limit=8):
+def retrieve(root, case_id, query, claim_id=None, limit=8, document_ids=None):
     synonyms = {'memoria': 'memory', 'aprendizaje': 'learning', 'esquemas': 'schema',
                 'capacidad': 'capacity', 'problemas': 'problem', 'guiada': 'guidance',
                 'recuperación': 'retrieval', 'atención': 'attention', 'inteligencia': 'intelligence'}
     words = set(re.findall(r'\w{4,}', query.casefold()))
     words.update(synonyms[w] for w in list(words) if w in synonyms)
     ranked = []
+    permitted=set(document_ids or [])
     for record in records(root, case_id):
+        if permitted and record['id'] not in permitted:
+            continue
         imports = [i for i in record['imports'] if i['case_id'] == case_id and i.get('claim_id') in (None, claim_id)]
         if not imports or not record.get('active_extraction'):
             continue

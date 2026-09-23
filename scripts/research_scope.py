@@ -124,6 +124,59 @@ def add_candidate(case_id, claim, reason):
     library.save(path,meta);library.refresh()
     return candidate
 
+
+def propose_reformulation(case_id, claim_id, revised_text, dimension_ids, reason, actor='usuario local'):
+    """Create an immutable narrower-claim proposal; it has no inherited verdict/evidence."""
+    from research_agents import DIMENSIONS, stable_digest
+    path=library.case_path(case_id)/'case.json';meta=library.read(path)
+    rows=library.read(library.case_path(case_id)/'claims.json',[])
+    parent=next((row for row in rows if row.get('id')==claim_id),None)
+    if not meta or not parent:raise ValueError('Expediente o afirmación inexistente')
+    if meta.get('claim_reformulation_proposal'):raise ValueError('Resuelve primero la propuesta de reformulación pendiente')
+    if not isinstance(revised_text,str) or not 10<=len(revised_text.strip())<=4000:raise ValueError('La formulación revisada debe tener entre 10 y 4000 caracteres')
+    if not isinstance(reason,str) or not reason.strip():raise ValueError('Explica qué parte queda fuera y por qué')
+    if not isinstance(dimension_ids,list) or not dimension_ids or any(item not in DIMENSIONS for item in dimension_ids):raise ValueError('Selecciona dimensiones conocidas para la formulación revisada')
+    normalized=' '.join(revised_text.split()).casefold()
+    if normalized==' '.join(parent['claim'].split()).casefold():raise ValueError('La formulación debe diferir del texto original')
+    now=library_stamp(); ident=uuid.uuid4().hex
+    record={'id':ident,'policy':'claim-reformulation-v1','version':1,'status':'proposed',
+            'case_id':case_id,'parent_claim_id':claim_id,'parent_claim_sha256':stable_digest(parent['claim']),
+            'revised_claim_id':uuid.uuid4().hex,'revised_claim':revised_text.strip(),
+            'retained_dimensions':list(dict.fromkeys(dimension_ids)),'reason':reason.strip()[:2000],
+            'actor':str(actor)[:120],'created_at':now,'evidence_inherited':False,'verdict_inherited':False}
+    meta.setdefault('claim_reformulation_history',[]).append(record)
+    meta['claim_reformulation_proposal']=record
+    library.save(path,meta)
+    return record
+
+
+def approve_reformulation(case_id, proposal_id, actor='usuario local'):
+    path=library.case_path(case_id)/'case.json';meta=library.read(path)
+    proposal=(meta or {}).get('claim_reformulation_proposal')
+    if not proposal or proposal.get('id')!=proposal_id:raise ValueError('La propuesta cambió; vuelve a cargarla')
+    rows=library.read(library.case_path(case_id)/'claims.json',[])
+    parent=next((row for row in rows if row.get('id')==proposal['parent_claim_id']),None)
+    from research_agents import stable_digest
+    if not parent or stable_digest(parent.get('claim',''))!=proposal['parent_claim_sha256']:
+        raise ValueError('La afirmación original cambió; no se aplicó la propuesta')
+    if any(row.get('id')==proposal['revised_claim_id'] for row in rows):raise ValueError('La versión hija ya existe')
+    child={'id':proposal['revised_claim_id'],'claim':proposal['revised_claim'],'status':'UNVERIFIED',
+           'category':parent.get('category'),'requires_external':True,'investigation_id':case_id,
+           'evidence':[],'created_at':library_stamp(),'run_id':'reformulation-'+proposal['id'],
+           'parent_claim_id':parent['id'],'claim_version':1,
+           'reformulation':{k:proposal[k] for k in ('id','retained_dimensions','reason','created_at')},
+           'evidence_inherited':False,'verdict_inherited':False}
+    rows.append(child);library.save(library.case_path(case_id)/'claims.json',rows)
+    approved={**proposal,'status':'approved','approved_at':library_stamp(),'approved_by':str(actor)[:120]}
+    meta.setdefault('claim_reformulation_history',[]).append(approved);meta.pop('claim_reformulation_proposal',None)
+    category=child.get('category') if child.get('category') in ('architecture','dependencies','changes') else 'dependencies'
+    registry=library.ROOT/'.project-intelligence'/'claims'/(category+'.json')
+    registered=library.read(registry,[])
+    if not any(row.get('id')==child['id'] for row in registered):
+        library.save(registry,registered+[child])
+    library.save(path,meta);library.refresh()
+    return child
+
 def report(case_id,scope):
     text='# Alcance de investigación\n\nEstado: '+scope['status']+'\n\nLa aprobación delimita trabajo; no verifica afirmaciones. Candidatos no seleccionados se conservan, no están resueltos.\n\n'
     if scope.get('base_scope_id'):
