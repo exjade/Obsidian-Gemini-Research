@@ -10,6 +10,21 @@ import library
 
 
 class TraceTests(unittest.TestCase):
+    def test_reused_collector_has_original_actions_and_observed_attribution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);folder=root/'.project-intelligence/evidence';folder.mkdir(parents=True)
+            event={'step_update':{'step_index':1,'conversation_id':'c','step_type':'tool','state':'DONE','tool_name':'search_web','tool_info':{'parameters':{'query':'original'}}}}
+            (folder/'previous_pass2.raw.json').write_text(json.dumps(event))
+            (folder/'previous_pass2.input.json').write_text(json.dumps({'message':{'content':'contract\n\nDATOS:\n'+json.dumps({'claims':[{'id':'a'}]})}}))
+            claim={'id':'a','provenance':[{'run_id':'current','collector_result':'evidence/previous_pass2.json','skeptic_result':'evidence/current_pass3.json'}]}
+            rows=action_trace.for_claim(root,claim)
+            self.assertEqual(len(rows),1);self.assertTrue(rows[0]['reused']);self.assertEqual(rows[0]['run_id'],'previous')
+            self.assertEqual(rows[0]['attribution'],'single_claim')
+            (folder/'previous_pass2.input.json').write_text(json.dumps({'message':{'content':'contract\n\nDATOS:\n'+json.dumps({'claims':[{'id':'a'},{'id':'b'}]})}}))
+            self.assertEqual(action_trace.for_claim(root,claim)[0]['attribution'],'batch')
+            claim['provenance'][0]['collector_result']='evidence/../../outside_pass2.json'
+            self.assertEqual(action_trace.for_claim(root,claim),[])
+
     def test_only_observed_tools_latest_run_and_no_reasoning(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);folder=root/'.project-intelligence/evidence';folder.mkdir(parents=True)

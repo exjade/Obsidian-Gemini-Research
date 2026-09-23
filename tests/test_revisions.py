@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from unittest.mock import patch
+import research_scope
 import pipeline as p
 import library as lib
 import revisions
@@ -20,6 +21,7 @@ class ReviewTests(unittest.TestCase):
         cid='fixture-case';self.folder=lib.case_path(cid);self.folder.mkdir()
         lib.save(self.folder/'case.json',{'id':cid,'title':'Fixture','question':'Fixture question','links':'','materials':[],'tags':[],'status':'completed','created_at':'2026-01-01','claim_ids':['target','other']})
         self.rows=[{'id':ident,'claim':'Statement '+ident,'category':'architecture','requires_external':False,'status':'UNSUPPORTED','evidence':[],'investigation_id':cid,'risk_policy':p.RISK_POLICY,'hypothesis_source':'DO_NOT_SEND_TO_SKEPTIC'} for ident in ('target','other')]
+        meta=lib.read(self.folder/'case.json');meta['scope']={'status':'approved','question_sha256':research_scope.question_hash(meta),'selected_ids':['target','other'],'candidates':[{'id':c['id'],'claim':c['claim']} for c in self.rows]};lib.save(self.folder/'case.json',meta)
         p.persist(self.rows);lib.write(self.folder/'resultados.md','PREVIOUS PUBLISHED REPORT');lib.refresh(self.rows)
         self.seen=[];self.fail_stage=None
         test=self
@@ -29,7 +31,14 @@ class ReviewTests(unittest.TestCase):
                 test.seen.append((stage,copy.deepcopy(data)))
                 if stage==test.fail_stage:raise ValueError('fixture failure '+stage)
                 if stage=='pass2':return [{**c,'status':'UNVERIFIED','evidence':[{'type':'file','path':'src/proof.txt','lines':'1-1','excerpt':'fixture proof'}]} for c in data['claims']]
-                if stage=='pass3':return [{**c,'status':'VERIFIED','domain':'general','sensible':False,'favorable':False,'skeptic_note':'fixture','contradiction_search':'fixture searched','primary_sources':[{'evidence_index':0,'independence_group':'fixture','reason':'fixture'}]} for c in data]
+                if stage=='pass3':
+                    reviewed=[]
+                    for c in data:
+                        row=copy.deepcopy(c);row['evidence'][0]['semantic_review']={
+                            'target_claim_id':c['id'],'decision':'support','basis':'fixture exact passage support',
+                            'limits':'','reviewer':'pass3'}
+                        reviewed.append({**row,'status':'VERIFIED','domain':'general','sensible':False,'favorable':False,'skeptic_note':'fixture','contradiction_search':'fixture searched','primary_sources':[{'evidence_index':0,'independence_group':'fixture','reason':'fixture'}]})
+                    return reviewed
                 if stage=='pass4':return [{'id':c['id'],'text':'Published '+c['claim']} for c in data]
                 raise AssertionError(stage)
         self.runner=Runner
@@ -43,6 +52,8 @@ class ReviewTests(unittest.TestCase):
         request=revisions.submit('fixture-case','target','https://example.org/original','New material')
         self.run_review(request['id']);rows={c['id']:c for c in p.all_claims()}
         self.assertEqual(rows['target']['status'],'VERIFIED');self.assertEqual(rows['other'],self.rows[1])
+        self.assertNotIn('pass4',[stage for stage,_ in self.seen])
+        self.assertFalse(lib.read(self.folder/'case.json')['publication']['consolidated'])
         self.assertEqual(rows['target']['provenance'][-1]['revision_id'],request['id'])
         collector=self.seen[0][1];self.assertEqual(len(collector['claims']),1)
         self.assertEqual(collector['git_context']['new_materials_unverified']['supplied_context_unverified'],'New material')
@@ -64,6 +75,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(revisions.history('fixture-case')[0]['status'],'error')
         self.assertFalse((self.root/'.project-intelligence/pipeline.lock').exists())
     def test_writer_failure_preserves_review(self):
+        meta=lib.read(self.folder/'case.json');meta['scope']['selected_ids']=['target'];lib.save(self.folder/'case.json',meta)
         request=revisions.submit('fixture-case','target');self.fail_stage='pass4'
         with self.assertRaises(ValueError):self.run_review(request['id'])
         self.assertEqual(p.all_claims()[0]['status'],'VERIFIED');self.assertEqual((self.folder/'resultados.md').read_text(),'PREVIOUS PUBLISHED REPORT')
@@ -74,6 +86,39 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):revisions.folder('fixture-case','../outside')
         request=revisions.submit('fixture-case','target')
         with self.assertRaises(ValueError):revisions.load('fixture-case',request['id'],'other')
+
+    def test_failed_second_claim_preserves_first_and_resume_skips_it(self):
+        candidates=[{**c,'status':'UNVERIFIED','risk_policy':None} for c in self.rows]
+        p.persist(candidates)
+        base=self.runner
+        class FailingSecond(base):
+            def call(self,stage,instructions,data):
+                if stage=='pass2' and data['claims'][0]['id']=='other':
+                    raise ValueError('Second claim timed out')
+                return super().call(stage,instructions,data)
+        with patch.object(p,'Runner',FailingSecond):
+            with self.assertRaisesRegex(ValueError,'timed out'):
+                p.evaluate_incrementally(candidates,candidates,{'diff':'fixture'})
+        saved=p.all_claims()
+        self.assertEqual([c['status'] for c in saved],['VERIFIED','UNVERIFIED'])
+        self.assertEqual((self.folder/'resultados.md').read_text(),'PREVIOUS PUBLISHED REPORT')
+        pending=[c for c in saved if c['status']=='UNVERIFIED' or c.get('risk_policy')!=p.RISK_POLICY]
+        self.seen.clear()
+        with patch.object(p,'Runner',base):
+            rows,checked=p.evaluate_incrementally(saved,pending,{'diff':'fixture'})
+        self.assertEqual([c['id'] for c in checked],['other'])
+        self.assertEqual(self.seen[0][1]['claims'][0]['id'],'other')
+        self.assertEqual(len(rows),2)
+
+    def test_timeout_reports_actual_limit_and_preserves_raw_output(self):
+        import subprocess
+        runner=p.Runner.__new__(p.Runner);runner.exe='fake-agy';runner.run_id='timeout-fixture'
+        error=subprocess.TimeoutExpired('fake-agy',900,output=b'partial events',stderr=b'partial error')
+        with patch.object(p.subprocess,'run',side_effect=error) as run:
+            with self.assertRaisesRegex(ValueError,'900 segundos'):
+                runner.call('pass2','fixture',{})
+        self.assertEqual(run.call_args.kwargs['timeout'],900)
+        self.assertEqual((p.INTEL/'evidence/timeout-fixture_pass2.raw.json').read_text(),'partial events')
 
     def test_frontend_request_and_busy_guard(self):
         import frontend,threading,urllib.request,urllib.error

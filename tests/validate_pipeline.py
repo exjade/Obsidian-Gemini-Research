@@ -34,7 +34,9 @@ def fake(self, stage, instructions, data, investigator=False):
         assert all(set(c) == {'id', 'claim', 'evidence'} for c in data)
         assert 'DO_NOT_SEND_TO_SKEPTIC' not in json.dumps(data)
         statuses = dict(zip(('supported', 'partial', 'unsupported', 'contradicted'), p.FINAL))
-        return [{**c, 'status': statuses[c['claim']], 'skeptic_note': 'reviewed',
+        return [{**c, 'evidence': [{**e, 'relation': 'contradiction' if c['claim']=='contradicted' else 'support',
+                 'semantic_review':{'target_claim_id':c['id'],'decision':'contradiction' if c['claim']=='contradicted' else 'support',
+                 'basis':'fixture exact passage review','limits':'','reviewer':'pass3'}} for e in c['evidence']], 'status': statuses[c['claim']], 'skeptic_note': 'reviewed',
                  'domain': 'general', 'sensible': False, 'favorable': False,
                  'primary_sources': [{'evidence_index': 0, 'independence_group': 'fixture', 'reason': 'source'}] if c['evidence'] else [],
                  'contradiction_search': 'checked source and counterexamples'} for c in data]
@@ -56,8 +58,8 @@ Path('work').mkdir(exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='gemini_pipeline_', dir=Path('work').resolve()) as tmp:
     root = Path(tmp)
     shutil.copy2(SOURCE / 'GEMINI.md', root / 'GEMINI.md')
-    for name in ('.project-intelligence', 'docs', 'src'):
-        shutil.copytree(SOURCE / name, root / name)
+    # Synthetic fixtures must not copy private cases or depend on their path lengths.
+    p.initialize(root)
     (root / '.project-intelligence/pipeline.lock').unlink(missing_ok=True)
     (root / '.project-intelligence/obsidian.json').unlink(missing_ok=True)
     for name in p.GROUPS:
@@ -124,6 +126,10 @@ with tempfile.TemporaryDirectory(prefix='gemini_pipeline_', dir=Path('work').res
     # Embedded errors and malformed responses must preserve raw output and fail.
     with patch.object(p.shutil, 'which', return_value='gemini'):
         runner = p.Runner()
+    # This fixture validates parsing and raw-output preservation without
+    # launching a real provider process.  Runner defaults to incremental
+    # Popen in production, while the deterministic test stubs subprocess.run.
+    runner.incremental = False
     for output in ('{"error":{"message":"failed"}}', '{"response":"not JSON"}'):
         proc = subprocess.CompletedProcess([], 0, stdout=output.encode(), stderr=b'fixture log')
         with patch.object(p.subprocess, 'run', return_value=proc):
