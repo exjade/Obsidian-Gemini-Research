@@ -7,6 +7,9 @@ import re
 import unicodedata
 import uuid
 import source_check
+import source_identity
+import source_metadata
+import source_resolver
 from urllib.parse import quote, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,6 +91,13 @@ def get_rows(meta, rows):
     return [c for c in rows if c.get('investigation_id')==meta['id'] or c['id'] in meta.get('claim_ids',[])]
 
 
+def related_cases(cases, meta):
+    """Relate by shared topic tags or canonical source IDs, never raw legacy URLs."""
+    return [case for case in cases if case['id']!=meta['id'] and
+            (set(case.get('tags',[])) & set(meta.get('tags',[])) or
+             set(case.get('source_ids',[])) & set(meta.get('source_ids',[])))]
+
+
 def set_status(case_id, status, error=''):
     path=case_path(case_id)/'case.json';meta=read(path)
     if meta is None: raise ValueError('No existe el expediente')
@@ -113,18 +123,62 @@ def refresh(rows=None):
         meta['summary']=f"{len(selected)} afirmaciones; {meta['counts']['VERIFIED']} verificadas; {sum(c.get('sensible') is True or c.get('favorable') is True for c in selected)} con banderas de auditoría."
         meta['search_text']=' '.join([meta['title'],meta.get('question',''),meta.get('links',''),*meta.get('tags',[]),*[c['claim'] for c in selected]]).casefold()
         save(folder/'claims.json',selected)
-        sources=[]
+        source_ids=[]
         for c in selected:
-            for e in c.get('evidence',[]):
-                if e.get('type')!='external':continue
-                url=canonical_url(e['url']);source=catalogue.setdefault(url,{'url':url,'title':e.get('title',url),'cases':[],'claims':[]})
-                if meta['id'] not in source['cases']:source['cases'].append(meta['id'])
-                if c['id'] not in source['claims']:source['claims'].append(c['id'])
-                if url not in sources:sources.append(url)
-        meta['source_urls']=sources
+            for index,e in enumerate(c.get('evidence',[])):
+                sid=e.get('source_id');eid=e.get('evidence_id')
+                # Legacy records without persisted policy IDs remain outside the catalogue.
+                if not source_identity.has_catalog_identity(e):continue
+                source=catalogue.setdefault(sid,{'source_id':sid,'identity_policy':e['source_identity_policy'],
+                    'title':e.get('title',''),'url':e.get('url',''),'type':e.get('type','unknown'),
+                    'references':[],'case_ids':[],'claim_ids':[],'passages':{},'metadata_assertions':[],
+                    'metadata_resolutions':[]})
+                reference={k:e[k] for k in ('type','url','title','doi','pmid','pmcid','document_sha256') if e.get(k) not in (None,'')}
+                if reference and reference not in source['references']:source['references'].append(reference)
+                for field,value in (('title',e.get('title')),('url',e.get('url')),('doi',e.get('doi')),
+                                    ('pmid',e.get('pmid')),('pmcid',e.get('pmcid')),
+                                    ('document_sha256',e.get('document_sha256')),('source_type',e.get('type'))):
+                    assertion=source_metadata.assertion(field,value,'evidence.declared.'+field,'declared',reference=eid)
+                    if assertion and assertion not in source['metadata_assertions']:
+                        source['metadata_assertions'].append(assertion)
+                if e.get('type')=='external' and e.get('source_check_id'):
+                    for assertion in source_check.trusted_metadata(e,ROOT/'.project-intelligence/source-checks'):
+                        if assertion not in source['metadata_assertions']:
+                            source['metadata_assertions'].append(assertion)
+                # Reuse only integrity-checked, already-persisted lookups bound to
+                # this source and a metadata identifier already present locally.
+                known_lookup_values={
+                    (item['field'], source_metadata.normalize_identifier(item['field'], item['value']))
+                    for item in source['metadata_assertions']
+                    if item.get('field') in ('doi','pmid','pmcid')
+                }
+                for receipt in source_resolver.trusted_receipts_for_source(ROOT,sid):
+                    lookup=(receipt.get('lookup_field'),receipt.get('lookup_value'))
+                    if lookup not in known_lookup_values:
+                        continue
+                    summary={key:receipt.get(key) for key in
+                             ('id','provider','lookup_field','lookup_value','retrieved_at','outcome')}
+                    if receipt.get('error'):
+                        summary['error']=receipt['error'][:300]
+                    if summary not in source['metadata_resolutions']:
+                        source['metadata_resolutions'].append(summary)
+                    for assertion in source_metadata.resolution_assertions(receipt):
+                        if assertion not in source['metadata_assertions']:
+                            source['metadata_assertions'].append(assertion)
+                if meta['id'] not in source['case_ids']:source['case_ids'].append(meta['id'])
+                if c['id'] not in source['claim_ids']:source['claim_ids'].append(c['id'])
+                passage=source['passages'].setdefault(eid,{'evidence_id':eid,'excerpt':e.get('excerpt',''),
+                    'physical_page':e.get('physical_page'),'chunk_id':e.get('chunk_id'),'lines':e.get('lines'),
+                    'extraction_id':e.get('extraction_id'),'relationships':[]})
+                rel={'case_id':meta['id'],'claim_id':c['id'],'evidence_id':eid,
+                     'role':source_identity.normalize_relation(e.get('relation')),
+                     'relation_type':'claim_passage','location':{k:e.get(k) for k in ('physical_page','chunk_id','lines','extraction_id') if e.get(k) is not None}}
+                if rel not in passage['relationships']:passage['relationships'].append(rel)
+                if sid not in source_ids:source_ids.append(sid)
+        meta['source_ids']=sorted(source_ids)
         save(folder/'case.json',meta)
     for meta in cases:
-        folder=case_path(meta['id']);related=[c for c in cases if c['id']!=meta['id'] and (set(c.get('tags',[])) & set(meta.get('tags',[])) or set(c.get('source_urls',[])) & set(meta.get('source_urls',[])))]
+        folder=case_path(meta['id']);related=related_cases(cases,meta)
         metadata='---\ntitle: '+json.dumps(meta['title'],ensure_ascii=False)+'\ntags:\n'+''.join('  - '+t+'\n' for t in ['tipo/investigacion','estado/'+meta['status'],*meta.get('tags',[])])+'case_id: '+meta['id']+'\n---\n'
         text=metadata+'# '+meta['title']+'\n\n'+meta['summary']+'\n\nEstado de ejecución: '+meta['status']+' (distinto del veredicto de las afirmaciones).\n\n'
         selected=read(folder/'claims.json',[])
@@ -134,6 +188,11 @@ def refresh(rows=None):
         pending=[c for c in selected if needs_review(c)]
         if pending:
             text+='> [!warning] '+str(len(pending))+' afirmaciones necesitan revisión\n> Consulta Fuentes y Auditoría; aporta respaldo en la ficha del frontend para reevaluar.\n\n'
+        closure=meta.get('closure')
+        if closure:
+            text+='> [!'+('success' if meta.get('publication',{}).get('consolidated') else 'warning')+'] '+('Resultados consolidados en la última ejecución' if meta.get('publication',{}).get('consolidated') else 'Informe provisional — investigación inconclusa')+'\n> Hipótesis resueltas: '+str(closure['resolved'])+'/'+str(closure['total'])+'. Estado de la última ejecución; consulta el frontend para comprobaciones actuales.\n\n'
+            for item in closure.get('blockers',[]):
+                text+='> [!warning] Falta resolver\n> '+item.get('claim','Alcance pendiente').replace('\n',' ')+'\n> '+item['reason'].replace('\n',' ')+'\n> Siguiente acción: '+item['action']+'\n\n'
         text+='## Estado de cada afirmación\n\n'
         for c in selected:
             verdict=c.get('status','UNVERIFIED');ctone={'VERIFIED':'success','CONTRADICTED':'failure','UNSUPPORTED':'warning','PARTIAL':'warning'}.get(verdict,'info')
@@ -148,15 +207,54 @@ def refresh(rows=None):
         text+=''.join('- [[Investigaciones/'+c['id']+'/resumen|'+c['title']+']]\n' for c in related) or 'Todavía no hay relaciones registradas.\n'
         if meta.get('error'):text+='\n## Último error\n\n'+meta['error']+'\n'
         write(folder/'resumen.md',text)
-    save(BASE/'sources.json',list(catalogue.values()))
+    catalogue_rows=[]
+    for source in catalogue.values():
+        source['case_ids']=sorted(source['case_ids']);source['claim_ids']=sorted(source['claim_ids'])
+        source['metadata_resolutions']=sorted(source['metadata_resolutions'],
+            key=lambda r:(r.get('lookup_field',''),r.get('lookup_value',''),r.get('provider',''),r.get('id','')))
+        source['references']=sorted(source['references'],key=lambda ref:json.dumps(ref,sort_keys=True,ensure_ascii=False))
+        source['metadata']=source_metadata.consolidate(source.pop('metadata_assertions',[]))
+        # Preserve legacy top-level display fields as deterministic convenience values.
+        if source['references']:
+            preferred=source['references'][0]
+            for key in ('title','url','type'):
+                if preferred.get(key):source[key]=preferred[key]
+        source['passages']=[dict(p,relationships=sorted(p['relationships'],key=lambda r:(r['case_id'],r['claim_id'],r['role'])))
+                            for p in sorted(source['passages'].values(),key=lambda p:p['evidence_id'])]
+        catalogue_rows.append(source)
+    catalogue_rows.sort(key=lambda s:s['source_id'])
+    save(BASE/'sources.json',{'policy':source_identity.CATALOG_POLICY,'sources':catalogue_rows,
+        'legacy_uncatalogued_count':sum(1 for c in rows for e in c.get('evidence',[]) if not source_identity.has_catalog_identity(e))})
     write(BASE/'Biblioteca.md','# Biblioteca de investigaciones\n\n[[Temas|Explorar por temas]] · [[Fuentes|Catálogo de fuentes]] · [[Guia|Cómo usar el cerebro de investigación]]\n\n'+''.join('- [[Investigaciones/'+m['id']+'/resumen|'+m['title']+']] — '+m['status']+' — '+m['summary']+'\n' for m in sorted(cases,key=lambda c:c['created_at'],reverse=True)))
     text='# Temas\n\n'
     for tag in sorted({t for m in cases for t in m.get('tags',[])}):
         text+='## #'+tag+'\n\n'+''.join('- [[Investigaciones/'+m['id']+'/resumen|'+m['title']+']]\n' for m in cases if tag in m.get('tags',[]))+'\n'
     write(BASE/'Temas.md',text)
     text='# Fuentes\n\nFuentes registradas en evidencias, no enlaces aportados todavía sin revisar. Compartir una URL no constituye dos fuentes independientes.\n\n'
-    for source in catalogue.values():
-        text+='- ['+source['title'].replace('[','').replace(']','')+']('+source['url']+')\n'+''.join('  - [[Investigaciones/'+cid+'/resumen]]\n' for cid in source['cases'])
+    text+='Los IDs agrupan según señales de identidad; no demuestran autenticidad, credibilidad, corroboración independiente ni verdad. Los roles pertenecen a la relación entre afirmación y pasaje.\n\n'
+    text+='Los metadatos locales se complementan únicamente con recibos bibliográficos explícitos, íntegros y ligados a identificadores ya registrados. Actualizar esta vista no consulta la red. La resolución bibliográfica no confirma autenticidad, independencia científica, apoyo semántico ni verdad; los conflictos quedan visibles y no cambian la identidad de la fuente.\n\n'
+    for source in catalogue_rows:
+        title=(source['title'] or source.get('url') or source['source_id']).replace('[','').replace(']','')
+        link='('+source['url']+')' if source.get('url') else ''
+        text+='- '+title+' · fuente `'+source['source_id'][:12]+'`'+(' '+link if link else '')+'\n'
+        metadata=source.get('metadata',{});identifiers=[]
+        for field,label in (('doi','DOI'),('pmid','PMID'),('pmcid','PMCID')):
+            item=metadata.get('fields',{}).get(field,{})
+            if item.get('value'):identifiers.append(label+': '+item['value'])
+        if identifiers:text+='  - Identificadores locales: '+', '.join(identifiers)+'\n'
+        if metadata.get('conflicts'):
+            names=', '.join(sorted({item['field'] for item in metadata['conflicts']}))
+            text+='  - Conflictos de metadatos por resolver: '+names+'; no se eligió un valor canónico.\n'
+        for resolution in source.get('metadata_resolutions',[]):
+            text+='  - Resolución bibliográfica explícita: '+str(resolution.get('provider','proveedor'))+' · '+str(resolution.get('lookup_field','identificador')).upper()+' '+str(resolution.get('lookup_value',''))+' · '+str(resolution.get('outcome','estado desconocido'))+' ('+str(resolution.get('retrieved_at','fecha desconocida'))+'). No acredita autenticidad ni apoyo científico.\n'
+        for ref in source['references']:
+            if ref.get('url') and ref.get('url')!=source.get('url'):
+                text+='  - Referencia: '+((ref.get('title')+' · ') if ref.get('title') else '')+ref['url']+' ('+str(ref.get('type','tipo no registrado'))+')\n'
+        for passage in source['passages']:
+            text+='  - Pasaje `'+passage['evidence_id'][:12]+'`\n'
+            for rel in passage['relationships']:
+                role={'support':'apoyo','contradiction':'contradicción','context':'contexto','unreviewed':'sin revisar'}[rel['role']]
+                text+='    - [['+'Investigaciones/'+rel['case_id']+'/resumen|'+rel['case_id']+']] · afirmación `'+rel['claim_id']+'` · '+role+'\n'
     write(BASE/'Fuentes.md',text)
 
 

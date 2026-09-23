@@ -35,7 +35,7 @@ def publish(manifest_path):
             tail=relative.parts[2:]
             if len(tail)==1 and relative.suffix=='.md':
                 target=vault/relative.name
-            elif len(tail)==2 and relative.name in ('resumen.md','pregunta.md','resultados.md','fuentes.md','auditoria.md','notas.md'):
+            elif len(tail)==2 and relative.name in ('resumen.md','pregunta.md','resultados.md','fuentes.md','auditoria.md','notas.md','documentos.md','alcance.md','revisiones-humanas.md'):
                 target=vault/'Investigaciones'/Path(*tail)
             elif len(tail)==3 and tail[1]=='adjuntos':
                 target=vault/'Investigaciones'/Path(*tail)
