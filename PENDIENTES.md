@@ -51,6 +51,34 @@ No exigir usar todo el archivo contextual: cubrir el alcance aprobado y consider
   - [x] Permitir «Investigar de nuevo» con operación independiente tras resultados terminados; distinguirlo del retry, conservar el resultado anterior y el historial hasta que el nuevo cierre, y agrupar clics concurrentes equivalentes.
 - [x] Revisión humana opcional registrada por ficha: actor declarado, fecha, evidencia examinada congelada, observación y límites; historial y exportación a Obsidian. No cambia veredictos ni el cierre científico. Autenticación de identidad humana pendiente.
 
+## Nuevo bloque — Informe de investigación argumentado y comprensión humana
+
+- [ ] Informe de investigación argumentado y comprensión humana.
+  - [ ] Definir una proyección semántica backend del informe por afirmación, derivada de registros observables y persistidos; mantenerla separada del resumen ejecutivo, la resolución científica y la auditoría técnica.
+  - [ ] Registrar razones estructuradas de suficiencia e insuficiencia por fuente y dimensión.
+  - [ ] Representar relaciones entre evidencias, incluidos apoyos y contradicciones, sin crear conclusiones que no estén registradas.
+  - [ ] Clasificar explícitamente cada evidencia como directa, transferible o contextual, sin alterar la resolución científica.
+  - [ ] Crear un informe argumentado profundo por afirmación, proporcional a la evidencia y al trabajo documentado, explicando apoyos, contradicciones, alternativas y límites.
+  - [ ] Redactar una narrativa extensa en proporción a la investigación documentada, sin alargarla artificialmente cuando los registros observables no lo justifiquen.
+  - [ ] Vincular cada afirmación factual de la narrativa con fuentes, pasajes y operaciones persistidos; consumir la trazabilidad existente de H3 sin duplicar su pendiente general.
+  - [ ] Explicar qué sí se sabe cuando una resolución es `unresolved`, conservando esa resolución sin cambiarla.
+  - [ ] Explicar caminos agotados y búsquedas fallidas, distinguiendo falta de evidencia, problemas de acceso y evidencia contradictoria.
+  - [ ] Explicar límites del proceso de investigación y cobertura pertinente usando el método H4, sin duplicar la tarea general de completar cobertura por dominio.
+  - [ ] Garantizar fidelidad narrativa con pruebas contra invenciones: no exponer chain-of-thought interna y no presentar como hecho nada que no pueda rastrearse a evidencia persistida.
+  - [ ] Separar claramente el resumen ejecutivo, el informe argumentado, la resolución científica y la auditoría técnica.
+  - [ ] Ofrecer orientación práctica bajo incertidumbre en una sección aparte y aclarar que no equivale a una conclusión científica.
+  - [ ] Crear un glosario científico, del sistema y del dominio usado por el informe.
+  - [ ] Integrar las definiciones del glosario junto a los términos correspondientes en contexto.
+  - [ ] Ofrecer lenguaje simple como complemento, sin sustituir ni degradar el contenido científico o técnico.
+  - [ ] Crear una vista de informe por afirmación.
+  - [ ] Crear un informe consolidado del expediente que mantenga visibles divergencias, resoluciones `unresolved` e historiales individuales.
+  - [ ] Regenerar y versionar informes argumentados; enlazar esta entrega con H7 para snapshots y detección de artefactos desactualizados, sin duplicar esa capacidad general.
+  - [ ] Validar la interfaz con uso real y probar comprensión humana en escenarios no técnicos, incluida la posibilidad de seguir la narrativa hasta la evidencia persistida.
+
+Principios del bloque: no se expone chain-of-thought interna; el informe se deriva de registros observables, puede comunicar conocimiento útil aunque una resolución siga `unresolved` y mantiene la orientación práctica separada de la conclusión científica. Toda narrativa factual debe poder rastrearse hasta evidencia persistida. La implementación consumirá la trazabilidad H3, el método H4 y el versionado H7 sin declararlos completos.
+
+Orden recomendado: contrato y proyección semántica → razones y relaciones de evidencia → clasificación y trazabilidad → informe por afirmación → conocimiento útil bajo `unresolved`, caminos agotados y límites → narrativa, glosario y lenguaje simple → vistas por afirmación y expediente → regeneración/versionado → validación UI y comprensión humana. La exploración de NotebookLM es opcional, aislada y depende de cotejar localmente sus citas; permanece como pendiente independiente en H2.
+
 ## H2 — Nuevo bloque: evidencia documental local (2026-09-18)
 
 ### Recuperación del Collector — primera entrega local
