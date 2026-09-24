@@ -98,6 +98,7 @@ def operation_read(operation_id):
     """Return a scoped view retaining both frontend and engine records."""
     frontend_record=read_json(operation_path(operation_id),None)
     engine_record=None
+    engine_identity_conflict=None
     try:
         module=importlib.import_module('research_operations')
         if callable(getattr(module,'get_operation',None)):
@@ -107,12 +108,32 @@ def operation_read(operation_id):
             store=factory(ROOT);getter=getattr(store,'get',None) or getattr(store,'get_operation',None)
             if callable(getter):
                 engine_record=getter(operation_id)
+    except research_operations.OperationConflict as exc:
+        engine_identity_conflict={'expected_operation_id':operation_id,'message':str(exc)}
     except (ImportError,AttributeError,TypeError,ValueError,OSError):
         pass
+    if isinstance(engine_record,dict):
+        engine_id=engine_record.get('operation_id') or engine_record.get('id')
+        if engine_id != operation_id:
+            engine_identity_conflict={'expected_operation_id':operation_id,
+                'actual_operation_id':engine_id,'message':'La identidad del registro del motor no coincide.'}
+            engine_record=None
     if not frontend_record and not engine_record:
+        if engine_identity_conflict:
+            raise ValueError(engine_identity_conflict.get('message') or 'Identidad de operación incompatible')
         raise ValueError('Operación inexistente')
     frontend_record=frontend_record or {};engine_record=engine_record or {}
-    merged={**frontend_record,**engine_record}
+    terminal={'done','resolved','completed_with_limits','failed','error','cancelled'}
+    engine_status=engine_record.get('status');front_status=frontend_record.get('status')
+    engine_terminal=engine_status in terminal
+    frontend_terminal=front_status in terminal
+    # A terminal record wins over a stale queued/running projection. When both
+    # are terminal, retain the established engine-first precedence.
+    authoritative=(frontend_record if frontend_terminal and not engine_terminal
+                   else engine_record if engine_terminal
+                   else engine_record or frontend_record)
+    supplemental=(engine_record if authoritative is frontend_record else frontend_record)
+    merged={**supplemental,**authoritative}
     merged.update(id=operation_id,operation_id=operation_id,
         frontend_status=frontend_record.get('status'),engine_status=engine_record.get('status'),
         frontend_error=frontend_record.get('error'),engine_error=engine_record.get('error'),
@@ -123,10 +144,12 @@ def operation_read(operation_id):
         started_at=_merge_timestamp(frontend_record,engine_record,'started_at',latest=False,prefer='frontend'),
         updated_at=_merge_timestamp(frontend_record,engine_record,'updated_at',latest=True,prefer='engine'),
         finished_at=_merge_timestamp(frontend_record,engine_record,'finished_at',latest=True,prefer='engine'))
-    engine_status=engine_record.get('status');front_status=frontend_record.get('status')
-    terminal={'done','resolved','completed_with_limits','failed','error','cancelled'}
-    merged['status']=engine_status if engine_status in terminal else (front_status or engine_status)
-    merged['error']=engine_record.get('error') or frontend_record.get('error')
+    merged['status']=authoritative.get('status')
+    merged['error']=authoritative.get('error')
+    if merged['error'] is None and engine_terminal and frontend_terminal:
+        merged['error']=supplemental.get('error')
+    if engine_identity_conflict:
+        merged['engine_identity_conflict']=engine_identity_conflict
     return merged
 
 
@@ -144,7 +167,7 @@ def job_snapshot(job=None):
         return snapshot
     snapshot['operation']={key:record.get(key) for key in (
         'operation_id','kind','case_id','claim_id','status','stage','error',
-        'frontend_error','engine_error') if key in record}
+        'frontend_error','engine_error','engine_identity_conflict') if key in record}
     return snapshot
 
 

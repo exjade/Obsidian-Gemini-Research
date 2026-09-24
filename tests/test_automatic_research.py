@@ -649,6 +649,28 @@ class AutomaticResearchTests(unittest.TestCase):
             self.assertEqual(saved_input['operation_id'],operation_id)
             self.assertEqual(saved_operation['input_fingerprint'],saved_input['input_fingerprint'])
 
+    def test_operation_store_rejects_mismatched_identity_and_never_reads_temp_as_canonical(self):
+        requested='1'*32;recorded='2'*32
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            folder=store.folder(requested);folder.mkdir(parents=True)
+            (folder/'operation.json').write_text(json.dumps({'operation_id':recorded,'status':'queued'}),encoding='utf-8')
+            with self.assertRaisesRegex(research_operations.OperationConflict,'registrada'):
+                store.load(requested)
+            missing=store.folder('3'*32);missing.mkdir()
+            (missing/'operation.json.abcd.tmp').write_text(json.dumps({'operation_id':'3'*32,'status':'failed'}),encoding='utf-8')
+            with self.assertRaises(FileNotFoundError):
+                store.load('3'*32)
+
+    def test_atomic_json_replace_failure_keeps_old_canonical_and_cleans_its_temp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target=Path(temp)/'operation.json';target.write_text('{"old": true}',encoding='utf-8')
+            with patch.object(research_operations.os,'replace',side_effect=PermissionError('Windows replace denied')):
+                with self.assertRaisesRegex(PermissionError,'Windows replace denied'):
+                    research_operations._atomic_json(target,{'new':True})
+            self.assertEqual(target.read_text(encoding='utf-8'),'{"old": true}')
+            self.assertEqual([path.name for path in Path(temp).iterdir()],['operation.json'])
+
     def test_create_with_id_is_idempotent_and_preserves_artifacts_and_checkpoints(self):
         operation_id='bee3a1b837bb4186b3c3f59b740fc57b'
         with tempfile.TemporaryDirectory() as temp:
@@ -1209,6 +1231,95 @@ class AutomaticResearchTests(unittest.TestCase):
                 self.assertEqual(merged['frontend_status'],'failed');self.assertEqual(merged['engine_status'],'failed')
             finally:
                 frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_frontend_terminal_error_wins_over_mismatched_queued_engine_and_temp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation_id='7'*32;wrong_id='8'*32
+                frontend.operation_write({'id':operation_id,'operation_id':operation_id,
+                    'kind':'claim_research','case_id':'case','claim_id':'claim',
+                    'status':'error','stage':'retriever',
+                    'error':{'type':'AgentOutputError','message':'La salida del agente fue inválida.'}})
+                folder=research_operations.store(root).folder(operation_id);folder.mkdir(parents=True)
+                (folder/'operation.json').write_text(json.dumps({'operation_id':wrong_id,
+                    'status':'queued','stage':'queued','error':None}),encoding='utf-8')
+                (folder/'operation.json.retry.tmp').write_text(json.dumps({'operation_id':operation_id,
+                    'status':'running','stage':'retriever'}),encoding='utf-8')
+                snapshot=frontend.job_snapshot({'status':'error','operation_id':operation_id,'log':''})
+                operation=snapshot['operation']
+                self.assertEqual(operation['operation_id'],operation_id)
+                self.assertEqual(operation['status'],'error')
+                self.assertEqual(operation['stage'],'retriever')
+                self.assertEqual(operation['error']['message'],'La salida del agente fue inválida.')
+                self.assertEqual(operation['engine_identity_conflict']['expected_operation_id'],operation_id)
+                self.assertIn(wrong_id,operation['engine_identity_conflict']['message'])
+                self.assertEqual(frontend.operation_read(operation_id)['operation_id'],operation_id)
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_matching_frontend_terminal_error_wins_over_engine_queued_without_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation_id='6'*32
+                frontend.operation_write({'id':operation_id,'operation_id':operation_id,
+                    'kind':'claim_research','case_id':'case','claim_id':'claim',
+                    'status':'failed','stage':'retriever',
+                    'error':{'type':'ValueError','message':'retriever output malformed'}})
+                store=research_operations.store(root)
+                store.create_with_id(operation_id,'case','claim','Synthetic claim')
+                merged=frontend.operation_read(operation_id)
+                self.assertEqual(merged['frontend_status'],'failed')
+                self.assertEqual(merged['engine_status'],'queued')
+                self.assertEqual(merged['status'],'failed')
+                self.assertEqual(merged['stage'],'retriever')
+                self.assertEqual(merged['error']['message'],'retriever output malformed')
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_engine_terminal_error_wins_over_matching_frontend_queued_projection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation_id='9'*32
+                frontend.operation_write({'id':operation_id,'operation_id':operation_id,
+                    'kind':'claim_research','case_id':'case','claim_id':'claim',
+                    'status':'queued','stage':'queued','error':None})
+                store=research_operations.store(root)
+                store.create_with_id(operation_id,'case','claim','Synthetic claim')
+                store.update(operation_id,status='failed',stage='final_auditor',
+                    error={'type':'AgentOutputError','message':'auditor rejected result'})
+                merged=frontend.operation_read(operation_id)
+                self.assertEqual(merged['operation_id'],operation_id)
+                self.assertEqual(merged['status'],'failed')
+                self.assertEqual(merged['stage'],'final_auditor')
+                self.assertEqual(merged['error']['message'],'auditor rejected result')
+                snapshot=frontend.job_snapshot({'status':'error','operation_id':operation_id,'log':''})
+                self.assertEqual(snapshot['operation']['stage'],'final_auditor')
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_frontend_terminal_error_survives_matching_engine_terminal_without_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation_id='5'*32
+                frontend.operation_write({'id':operation_id,'operation_id':operation_id,
+                    'kind':'claim_research','case_id':'case','claim_id':'claim',
+                    'status':'failed','stage':'wrapper_finalize',
+                    'error':{'type':'RuntimeError','message':'finalization failed in frontend'}})
+                store=research_operations.store(root)
+                store.create_with_id(operation_id,'case','claim','Synthetic claim')
+                store.update(operation_id,status='failed',stage='engine_finalize',error=None)
+                merged=frontend.operation_read(operation_id)
+                self.assertEqual(merged['operation_id'],operation_id)
+                self.assertEqual(merged['status'],'failed')
+                self.assertEqual(merged['stage'],'engine_finalize')
+                self.assertIsNone(merged['engine_error'])
+                self.assertEqual(merged['error']['message'],'finalization failed in frontend')
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
 
     def test_operation_history_normalizes_offsets_and_sorts_missing_dates_last(self):
         with tempfile.TemporaryDirectory() as temp:

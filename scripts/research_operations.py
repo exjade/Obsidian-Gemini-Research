@@ -55,8 +55,17 @@ def utcnow() -> str:
 def _atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, path)
+    except BaseException:
+        # A failed replace is not a committed write. Retire only this call's
+        # temporary file; never promote or read a leftover .tmp as canonical.
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 class OperationStore:
@@ -163,7 +172,16 @@ class OperationStore:
             claim_version=claim_version, idempotent=True)
 
     def load(self, operation_id: str) -> dict[str, Any]:
-        return json.loads((self.folder(operation_id) / "operation.json").read_text(encoding="utf-8"))
+        record = json.loads((self.folder(operation_id) / "operation.json").read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            raise OperationConflict("El registro canónico de operación no es un objeto JSON")
+        recorded_id = record.get("operation_id")
+        if recorded_id != operation_id:
+            raise OperationConflict(
+                "La identidad del registro canónico no coincide con su carpeta: "
+                f"solicitada={operation_id}; registrada={recorded_id!r}"
+            )
+        return record
 
     def update(self, operation_id: str, **changes: Any) -> dict[str, Any]:
         record = self.load(operation_id)
