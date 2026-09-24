@@ -772,18 +772,192 @@ class AutomaticResearchTests(unittest.TestCase):
                 self.assertIsNone(retried['error'])
             finally:frontend.INTEL=old
 
-    def test_frontend_does_not_repeat_completed_claim_research(self):
+    def test_explicit_new_run_after_completed_research_uses_new_id_and_preserves_result(self):
         with tempfile.TemporaryDirectory() as temp:
             old=frontend.INTEL
             try:
                 frontend.INTEL=Path(temp)
                 first,created=frontend.operation_start('claim_research','case','claim')
                 self.assertTrue(created)
-                frontend.operation_update(first['id'],status='done',result={'outcome':'completed_with_limits'})
-                same,created_again=frontend.operation_start('claim_research','case','claim')
-                self.assertFalse(created_again)
-                self.assertEqual(same['id'],first['id'])
+                completed=frontend.operation_update(first['id'],status='done',result={'outcome':'completed_with_limits'})
+                second,created_again=frontend.operation_start('claim_research','case','claim',new_run=True)
+                self.assertTrue(created_again)
+                self.assertNotEqual(second['id'],first['id'])
+                self.assertEqual(second['new_run_of'],first['id'])
+                self.assertEqual(frontend.operation_read(first['id'])['result'],completed['result'])
+                self.assertEqual(second['requested_at'],second['updated_at'])
             finally:frontend.INTEL=old
+
+    def test_failed_retry_reuses_id_inputs_and_original_request_time(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old=frontend.INTEL
+            try:
+                frontend.INTEL=Path(temp)
+                first,created=frontend.operation_start('claim_research','case','claim',{'evidence_mode':'documents_only','document_ids':['doc-1']})
+                self.assertTrue(created)
+                requested=first['requested_at']
+                frontend.operation_update(first['id'],status='running',stage='retriever')
+                frontend.operation_update(first['id'],status='error',error={'type':'ValueError','message':'provider failure'})
+                finished_before_retry=frontend.operation_read(first['id'])['finished_at']
+                retried,restarted=frontend.operation_start('claim_research','case','claim',{'evidence_mode':'documents_only','document_ids':['doc-1']})
+                self.assertTrue(restarted)
+                self.assertEqual(retried['id'],first['id'])
+                self.assertEqual(retried['requested_at'],requested)
+                self.assertEqual(retried['created_at'],requested)
+                self.assertEqual(retried['retry_requested_at'] > requested,True)
+                self.assertEqual(retried['input_data'],first['input_data'])
+                self.assertIsNone(retried['finished_at'])
+                self.assertEqual(len(retried['attempt_history']),1)
+                self.assertEqual(retried['attempt_history'][0]['finished_at'],finished_before_retry)
+                self.assertEqual(retried['attempt_history'][0]['error']['message'],'provider failure')
+                self.assertTrue(retried['requested_at'].endswith('+00:00'))
+            finally:frontend.INTEL=old
+
+    def test_claim_operation_history_keeps_result_and_scoped_failure_separate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=Path(temp)/'.project-intelligence';frontend.ROOT=Path(temp)
+                completed,_=frontend.operation_start('claim_research','case','claim',{'evidence_mode':'question_search'})
+                frontend.operation_update(completed['id'],status='done',result={'scientific_resolution':{'resolution':'indeterminate'}})
+                failed,_=frontend.operation_start('claim_research','case','claim',{'evidence_mode':'question_search'},new_run=True)
+                frontend.operation_update(failed['id'],status='running',stage='skeptic')
+                frontend.operation_update(failed['id'],status='failed',stage='skeptic',error={'type':'AgentOutputError','message':'specific failure'})
+                rows=frontend.operations_for('case','claim')
+                self.assertEqual({row['id'] for row in rows},{completed['id'],failed['id']})
+                scoped=next(row for row in rows if row['id']==failed['id'])
+                self.assertEqual(scoped['error']['message'],'specific failure')
+                self.assertEqual(next(row for row in rows if row['id']==completed['id'])['result']['scientific_resolution']['resolution'],'indeterminate')
+            finally:
+                frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_operation_read_preserves_frontend_and_engine_errors_with_same_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                root=Path(temp);frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                ui,_=frontend.operation_start('claim_research','case','claim')
+                engine=research_operations.store(root).create_with_id(ui['id'],'case','claim','A synthetic claim')
+                frontend.operation_update(ui['id'],status='running')
+                frontend.operation_update(ui['id'],status='failed',error={'type':'WrapperError','message':'wrapper failure'})
+                research_operations.store(root).update(engine['operation_id'],status='running')
+                research_operations.store(root).update(engine['operation_id'],status='failed',error={'type':'EngineError','message':'engine failure'})
+                merged=frontend.operation_read(ui['id'])
+                self.assertEqual(merged['error']['message'],'engine failure')
+                self.assertEqual(merged['frontend_error']['message'],'wrapper failure')
+                self.assertEqual(merged['engine_error']['message'],'engine failure')
+                self.assertEqual(merged['frontend_status'],'failed');self.assertEqual(merged['engine_status'],'failed')
+            finally:
+                frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_operation_history_normalizes_offsets_and_sorts_missing_dates_last(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=Path(temp)/'.project-intelligence';frontend.ROOT=Path(temp)
+                base={'kind':'claim_research','case_id':'case','claim_id':'claim','status':'queued','result':None}
+                for ident,requested in [('a'*32,'2026-09-23T12:00:00+02:00'),('b'*32,'2026-09-23T11:00:00Z'),('c'*32,None)]:
+                    frontend.operation_write({**base,'id':ident,'operation_id':ident,'requested_at':requested})
+                rows=frontend.operations_for('case','claim')
+                self.assertEqual([row['id'] for row in rows],['b'*32,'a'*32,'c'*32])
+                self.assertIsNone(rows[-1]['requested_at'])
+            finally:
+                frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_case_claims_exposes_canonical_claim_research_history_projection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            case=Path(temp)/'case';case.mkdir()
+            library.save(case/'claims.json',[{'id':'claim','claim':'A synthetic claim','status':'UNSUPPORTED','evidence':[]}])
+            library.save(case/'case.json',{})
+            completed={'operation_id':'done-id','id':'done-id','kind':'claim_research','case_id':'case','claim_id':'claim',
+                'requested_at':'2026-09-22T09:00:00Z','finished_at':'2026-09-22T10:00:00Z','status':'done',
+                'result':{'outcome':'indeterminate'},'evidence_mode':'documents_only','document_ids':['doc-1'],
+                'input_data':{'document_ids':['doc-1']}}
+            failed={'operation_id':'failed-id','id':'failed-id','kind':'claim_research','case_id':'case','claim_id':'claim',
+                'requested_at':'2026-09-23T09:00:00Z','finished_at':'2026-09-23T09:01:00Z','status':'failed',
+                'error':{'type':'ValueError','message':'scoped failure'}}
+            with patch.object(frontend,'operations_for',return_value=[failed,completed]), \
+                 patch.object(frontend.human_review,'history',return_value=[]), \
+                 patch.object(frontend.revisions,'history',return_value=[]), \
+                 patch.object(frontend.action_trace,'for_claim',return_value=[]), \
+                 patch.object(frontend.action_trace,'summary_for_claim',return_value={}), \
+                 patch.object(frontend.action_trace,'receipts_for_claim',return_value=[]):
+                claim=frontend.case_claims(case)[0]
+            self.assertEqual([row['operation_id'] for row in claim['investigation_history']],['failed-id','done-id'])
+            self.assertEqual(claim['latest_investigation']['operation_id'],'failed-id')
+            self.assertEqual(claim['latest_investigation']['error']['message'],'scoped failure')
+            self.assertEqual(claim['current_completed_investigation']['operation_id'],'done-id')
+            self.assertEqual(claim['current_completed_investigation']['result']['outcome'],'indeterminate')
+            self.assertEqual(claim['current_completed_investigation']['evidence_mode'],'documents_only')
+            self.assertEqual(claim['current_completed_investigation']['document_ids'],['doc-1'])
+
+    def test_claim_history_includes_only_explicitly_associated_technical_checks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=Path(temp)/'.project-intelligence';frontend.ROOT=Path(temp)
+                linked,_=frontend.operation_start('technical_check','case',None,{'claim_ids':['claim']})
+                frontend.operation_update(linked['id'],status='done',result={'source_receipts':[{'claim_id':'claim','source_check_id':'receipt'}]})
+                unlinked,_=frontend.operation_start('technical_check','case',None,{'claim_ids':['other-claim']})
+                frontend.operation_update(unlinked['id'],status='done',result={'source_receipts':[{'claim_id':'other-claim','source_check_id':'other-receipt'}]})
+                rows=frontend.operations_for('case','claim')
+                self.assertEqual([row['id'] for row in rows],[linked['id']])
+            finally:
+                frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_casewide_source_check_persists_each_claim_receipt_without_changing_verdicts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);case=root/'case';case.mkdir();intel=root/'.project-intelligence'
+            evidence={'type':'external','source_id':'source-1','url':'https://example.org/paper','excerpt':'literal passage'}
+            claims=[{'id':'claim-a','claim':'A','status':'UNSUPPORTED','evidence':[evidence]},
+                    {'id':'claim-b','claim':'B','status':'VERIFIED','evidence':[evidence]}]
+            library.save(case/'claims.json',claims)
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            old_job=dict(frontend.JOB)
+            try:
+                frontend.INTEL=intel;frontend.ROOT=root
+                operation,_=frontend.operation_start('technical_check','case',None,{'claim_ids':['claim-a','claim-b']})
+                receipt={'id':'receipt-1','checked_at':'2026-09-23T11:00:00+00:00','availability':'AVAILABLE',
+                         'excerpt_match':True,'eligible':True,'http_status':200,'final_url':evidence['url']}
+                with patch.object(library,'case_path',return_value=case),patch.object(frontend.source_check,'record_check',return_value=receipt):
+                    frontend.check_case_sources('case',operation_id=operation['id'])
+                finished=frontend.operation_read(operation['id'])
+                self.assertEqual(finished['status'],'done')
+                self.assertFalse(finished['result']['verdict_changed'])
+                self.assertEqual({row['claim_id'] for row in finished['result']['source_receipts']},{'claim-a','claim-b'})
+                self.assertEqual({row['source_check_id'] for row in finished['result']['source_receipts']},{'receipt-1'})
+                self.assertEqual([row['status'] for row in library.read(case/'claims.json',[])],['UNSUPPORTED','VERIFIED'])
+            finally:
+                frontend.INTEL,frontend.ROOT=old_intel,old_root;frontend.JOB.clear();frontend.JOB.update(old_job)
+
+    def test_scientific_projection_is_idempotent_and_keeps_operation_provenance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);case=root/'case';case.mkdir()
+            claims=[{'id':'claim','claim':'A synthetic claim','status':'UNSUPPORTED'}]
+            library.save(case/'claims.json',claims)
+            operation={'operation_id':'a'*32,'case_id':'case','claim_id':'claim','status':'completed_with_limits',
+                'finished_at':'2026-09-23T12:00:00+00:00','result':{'outcome':'completed_with_limits',
+                'scientific_resolution':{'resolution_id':'resolution-1','resolution':'indeterminate',
+                    'input_fingerprint':'fingerprint','dimensions':{},'created_at':'2026-09-23T12:00:00+00:00'},
+                'bounded_resolution':{'status':'excluded_with_limit'}}}
+            with patch.object(library,'case_path',return_value=case):
+                research_operations._persist_projection(root,operation)
+                research_operations._persist_projection(root,operation)
+            saved=library.read(case/'claims.json',[])[0]
+            self.assertEqual(len(saved['scientific_resolution_history']),1)
+            self.assertEqual(saved['scientific_resolution_history'][0]['operation_id'],operation['operation_id'])
+            self.assertEqual(len(saved['dimension_matrix_history']),1)
+            self.assertEqual(len(saved['automatic_research_history']),1)
+
+    def test_adaptive_budget_plan_is_persisted_on_the_operation_for_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            operation=store.create('case','claim','A synthetic claim')
+            orchestrator=research_operations.ResearchOrchestrator(store,FakeProvider())
+            plan=orchestrator._persist_budget_plan(operation,{'matrix':{'horizon':'long-term'},'competing_hypotheses':['H1']})
+            saved=store.load(operation['operation_id'])
+            self.assertEqual(saved['budget_plan'],plan)
+            self.assertEqual(saved['budget_plan']['operation_query_cap'],plan['operation_query_cap'])
 
     def test_retry_reuses_validated_checkpoints_and_usage(self):
         provider=FakeProvider()

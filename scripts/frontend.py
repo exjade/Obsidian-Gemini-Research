@@ -24,6 +24,7 @@ import research_scope
 import source_identity
 import human_review
 import research_closure
+import claim_timeline
 import research_operations
 import pipeline
 import case_removal
@@ -66,23 +67,36 @@ def operation_path(operation_id):
 
 
 def operation_read(operation_id):
-    """Read either the shared operation store or the local compatibility store."""
+    """Return a scoped view retaining both frontend and engine records."""
+    frontend_record=read_json(operation_path(operation_id),None)
+    engine_record=None
     try:
         module=importlib.import_module('research_operations')
         if callable(getattr(module,'get_operation',None)):
-            value=module.get_operation(ROOT,operation_id)
-            if value:return value
+            engine_record=module.get_operation(ROOT,operation_id)
         factory=getattr(module,'store',None)
-        if callable(factory):
+        if not engine_record and callable(factory):
             store=factory(ROOT);getter=getattr(store,'get',None) or getattr(store,'get_operation',None)
             if callable(getter):
-                value=getter(operation_id)
-                if value:return value
+                engine_record=getter(operation_id)
     except (ImportError,AttributeError,TypeError,ValueError,OSError):
         pass
-    value=read_json(operation_path(operation_id),None)
-    if not value:raise ValueError('Operación inexistente')
-    return value
+    if not frontend_record and not engine_record:
+        raise ValueError('Operación inexistente')
+    frontend_record=frontend_record or {};engine_record=engine_record or {}
+    merged={**frontend_record,**engine_record}
+    merged.update(id=operation_id,operation_id=operation_id,
+        frontend_status=frontend_record.get('status'),engine_status=engine_record.get('status'),
+        frontend_error=frontend_record.get('error'),engine_error=engine_record.get('error'),
+        requested_at=frontend_record.get('requested_at') or engine_record.get('requested_at') or engine_record.get('created_at'),
+        created_at=engine_record.get('created_at') or frontend_record.get('created_at') or frontend_record.get('requested_at'),
+        started_at=engine_record.get('started_at') or frontend_record.get('started_at'),
+        finished_at=engine_record.get('finished_at') or frontend_record.get('finished_at'))
+    engine_status=engine_record.get('status');front_status=frontend_record.get('status')
+    terminal={'done','resolved','completed_with_limits','failed','error','cancelled'}
+    merged['status']=engine_status if engine_status in terminal else (front_status or engine_status)
+    merged['error']=engine_record.get('error') or frontend_record.get('error')
+    return merged
 
 
 def operation_write(record):
@@ -96,14 +110,29 @@ def operation_update(operation_id, **changes):
     with OPERATION_LOCK:
         record=read_json(operation_path(operation_id),None)
         if not record:raise ValueError('Operación inexistente')
+        old_status=record.get('status');new_status=changes.get('status')
+        now=utcnow()
+        if new_status=='running' and old_status!='running':
+            record.setdefault('attempt_history',[])
+            attempt_number=len(record['attempt_history'])+1
+            record['attempt_history'].append({'number':attempt_number,'started_at':now})
+            record.setdefault('started_at',now)
+            record['last_attempt_at']=now
+            record['finished_at']=None
+        if new_status in ('done','resolved','completed_with_limits','failed','error','cancelled'):
+            record['finished_at']=now
+            attempts=record.get('attempt_history') or []
+            if attempts and not attempts[-1].get('finished_at'):
+                attempts[-1]['finished_at']=now;attempts[-1]['status']=new_status
+                if changes.get('error'):attempts[-1]['error']=changes['error']
         record.update(changes);record['updated_at']=utcnow()
-        if record.get('status') in ('done','error','cancelled') and not record.get('finished_at'):
-            record['finished_at']=record['updated_at']
         return operation_write(record)
 
 
-def operation_start(kind,case_id,claim_id=None,input_data=None):
+def operation_start(kind,case_id,claim_id=None,input_data=None,new_run=False):
     """Create one durable operation and coalesce repeated clicks while it runs."""
+    if type(new_run) is not bool or (new_run and kind!='claim_research'):
+        raise ValueError('new_run sólo se admite como booleano en investigaciones de afirmaciones')
     with OPERATION_LOCK:
         directory=operation_directory();directory.mkdir(parents=True,exist_ok=True)
         previous=[]
@@ -113,44 +142,85 @@ def operation_start(kind,case_id,claim_id=None,input_data=None):
             same=(current.get('input_fingerprint') or hashlib.sha256(b'{}').hexdigest())==fingerprint
             if same and (current.get('kind'),current.get('case_id'),current.get('claim_id'))==(kind,case_id,claim_id) and current.get('status') in ('queued','running'):
                 return current,False
-            if same and (current.get('kind'),current.get('case_id'),current.get('claim_id'))==(kind,case_id,claim_id):
+            if (current.get('kind'),current.get('case_id'),current.get('claim_id'))==(kind,case_id,claim_id):
                 previous.append(current)
         # Automatic research is checkpointed. Reuse the most recent failed
         # operation id so completed agents, searches and retrieved pages are
         # not repeated on retry.
-        if kind=='claim_research':
-            completed=[row for row in previous if row.get('status') in ('done','resolved','completed_with_limits') and row.get('result')]
+        if kind=='claim_research' and not new_run:
+            completed=[row for row in previous if row.get('input_fingerprint')==fingerprint and row.get('status') in ('done','resolved','completed_with_limits') and row.get('result')]
             if completed:
                 # The primary button represents one bounded investigation. A
                 # completed result must not be replaced by an accidental
                 # second click; a future explicit "new run" action can create
                 # a separate operation deliberately.
                 return max(completed,key=lambda row:row.get('updated_at','')),False
-            failed=[row for row in previous if row.get('status') in ('error','failed')]
+            failed=[row for row in previous if row.get('input_fingerprint')==fingerprint and row.get('status') in ('error','failed')]
             if failed:
                 record=max(failed,key=lambda row:row.get('updated_at',''))
                 record.update(status='queued',stage='Reanudando desde el último avance',
                               progress={'current':0,'total':3,'unit':'rondas'},error=None,
-                              updated_at=utcnow(),finished_at=None)
+                              retry_requested_at=utcnow(),updated_at=utcnow(),finished_at=None)
                 return operation_write(record),True
+        prior=sorted(previous,key=lambda row:(row.get('requested_at') or row.get('created_at') or '',row.get('id','')),reverse=True)
         now=utcnow();record={'id':uuid.uuid4().hex,'kind':kind,'case_id':case_id,'claim_id':claim_id,
             'input_data':input_data or {},'input_fingerprint':hashlib.sha256(json.dumps(input_data or {},sort_keys=True,ensure_ascii=False).encode()).hexdigest(),
             'status':'queued','stage':'En espera','progress':{'current':0,'total':0},
-            'requested_at':now,'updated_at':now,'result':None,'error':None}
+            'requested_at':now,'created_at':now,'updated_at':now,'result':None,'error':None}
+        if new_run:
+            record.update(new_run=True,new_run_reason='explicit_new_run',new_run_of=prior[0].get('id') if prior else None)
         return operation_write(record),True
 
 
-def operations_for(case_id,claim_id=None,limit=8):
-    result=[]
+def _merge_operation_records(operation_id):
+    return operation_read(operation_id)
+
+
+def operations_for(case_id,claim_id=None,limit=None):
+    found={}
     try:paths=list(operation_directory().glob('*.json'))
-    except OSError:return result
+    except OSError:return []
     for path in paths:
         row=read_json(path,{})
         if row.get('case_id')!=case_id:continue
-        if claim_id is not None and row.get('claim_id')!=claim_id:continue
-        result.append(row)
-    result.sort(key=lambda r:r.get('updated_at',''),reverse=True)
-    return result[:limit]
+        if claim_id is not None and row.get('claim_id')!=claim_id:
+            result_data=row.get('result') if isinstance(row.get('result'),dict) else {}
+            input_data=row.get('input_data') if isinstance(row.get('input_data'),dict) else {}
+            receipt_claims={item.get('claim_id') for item in result_data.get('source_receipts',[]) if isinstance(item,dict)}
+            listed=input_data.get('claim_ids',[])
+            if claim_id not in receipt_claims and claim_id not in listed:continue
+        found[row.get('id')]=row.get('id')
+    try:
+        for row in research_operations.operations_for_claim(ROOT,case_id,claim_id,limit=None):
+            found[row.get('operation_id')]=row.get('operation_id')
+    except (AttributeError,TypeError,ValueError,OSError):pass
+    result=[]
+    for ident in found:
+        try:result.append(_merge_operation_records(ident))
+        except (ValueError,OSError):continue
+    def order_key(row):
+        value=row.get('requested_at') or row.get('created_at')
+        try:
+            parsed=datetime.datetime.fromisoformat(str(value).replace('Z','+00:00'))
+            if parsed.tzinfo is None:raise ValueError('timestamp without timezone')
+            epoch=parsed.astimezone(datetime.timezone.utc).timestamp()
+            return (1,epoch,str(row.get('operation_id') or row.get('id') or ''))
+        except (TypeError,ValueError,OverflowError):
+            return (0,0.0,str(row.get('operation_id') or row.get('id') or ''))
+    # History is newest-first for review; offset timestamps are normalized to UTC.
+    result.sort(key=order_key,reverse=True)
+    return result[:limit] if limit else result
+
+
+def active_operation(kind,case_id,claim_id,input_data=None):
+    fingerprint=hashlib.sha256(json.dumps(input_data or {},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+    for path in operation_directory().glob('*.json') if operation_directory().exists() else []:
+        row=read_json(path,{})
+        if (row.get('kind'),row.get('case_id'),row.get('claim_id'))!=(kind,case_id,claim_id):continue
+        if row.get('input_fingerprint')!=fingerprint or row.get('status') not in ('queued','running'):continue
+        try:return operation_read(row.get('id'))
+        except (ValueError,OSError):continue
+    return None
 
 
 def prepare(data):
@@ -252,7 +322,12 @@ def check_case_sources(case_id, claim_id=None, operation_id=None):
     try:
         rows=library.read(library.case_path(case_id)/'claims.json',[])
         if claim_id: rows=[c for c in rows if c['id']==claim_id]
-        unique={source_check.key(e):e for c in rows for e in c.get('evidence',[]) if e['type']=='external'}
+        unique={};associations={}
+        for claim in rows:
+            for evidence in claim.get('evidence',[]):
+                if evidence.get('type')!='external':continue
+                key=source_check.key(evidence);unique.setdefault(key,evidence)
+                associations.setdefault(key,[]).append({'claim_id':claim.get('id'),'source_id':evidence.get('source_id')})
         before={key:source_check.latest(e,INTEL/'source-checks') for key,e in unique.items()}
         if operation_id:operation_update(operation_id,status='running',stage='Comprobando acceso y pasajes',progress={'current':0,'total':len(unique)})
         completed=0;records=[]
@@ -266,7 +341,16 @@ def check_case_sources(case_id, claim_id=None, operation_id=None):
         with ThreadPoolExecutor(max_workers=4) as pool:records=list(pool.map(check,unique.values()))
         changed=sum(_check_signature(record)!=_check_signature(before.get(key) or {}) for key,record in zip(unique,records))
         errors=sum(record.get('availability')=='ERROR' for record in records)
+        source_receipts=[]
+        for key,record in zip(unique,records):
+            for association in associations.get(key,[]):
+                source_receipts.append({'claim_id':association['claim_id'],'source_id':association.get('source_id'),
+                    'source_check_id':record.get('id'),'checked_at':record.get('checked_at'),
+                    'availability':record.get('availability'),'excerpt_match':record.get('excerpt_match'),
+                    'eligible':record.get('eligible'),'http_status':record.get('http_status'),
+                    'final_url':record.get('final_url'),'error':record.get('error')})
         result={'checked':len(records),'changed':changed,'unchanged':len(records)-changed,'errors':errors,
+                'source_receipts':source_receipts,
                 'verdict_changed':False,
                 'message':('Página accesible; el pasaje sigue presente. El veredicto no cambió porque esta comprobación no evalúa pertinencia.'
                            if records and not changed and all(r.get('eligible') for r in records)
@@ -343,6 +427,10 @@ def extract_document(case_id, ident, engine, force=False):
 
 def case_claims(folder):
     rows=library.read(folder/'claims.json',[])
+    case_id=folder.name;meta=library.read(folder/'case.json',{})
+    human_rows=human_review.history(case_id);reformulations=meta.get('claim_reformulation_history',[])
+    revision_rows=revisions.history(case_id)
+    scope_history=meta.get('scope_history',[])
     for c in rows:
         for key,default in (('research_summary',None),('support_matrix',None),
                             ('automatic_next_action','Buscar respaldo y reevaluar automáticamente.'),
@@ -362,14 +450,20 @@ def case_claims(folder):
         # Keep stored model verdict separate from current eligibility for publication.
         externals=[check for e,check in zip(c.get('evidence',[]),c['source_checks']) if e['type']=='external']
         c['external_content_confirmed']=all(check and check.get('eligible') for check in externals) if externals else None
-        c['latest_operations']=operations_for(folder.name,c.get('id'))
-        c['latest_operations']+=research_operations.operations_for_claim(ROOT,folder.name,c.get('id'))
-        c['latest_operations'].sort(key=lambda row:row.get('updated_at',''),reverse=True)
-        unique={}
-        for row in c['latest_operations']:
-            key=row.get('operation_id') or row.get('id')
-            if key not in unique:unique[key]=row
-        c['latest_operations']=list(unique.values())[:8]
+        c['latest_operations']=operations_for(case_id,c.get('id'))
+        c['claim_research_history']=claim_timeline.project_claim_research_history(c['latest_operations'],c.get('id'))
+        c['investigation_history']=c['claim_research_history']['operations']
+        c['latest_investigation']=c['claim_research_history']['latest_operation']
+        c['current_completed_investigation']=c['claim_research_history']['current_completed']
+        c['technical_check_history']= [row for row in c['latest_operations'] if row.get('kind')=='technical_check']
+        legacy_checks=[]
+        for evidence,check in zip(c.get('evidence',[]),c.get('source_checks',[])):
+            if check and evidence.get('source_check_id') and evidence.get('source_check_id')==check.get('id'):
+                legacy_checks.append({**check,'source_check_id':check.get('id')})
+        c['timeline']=claim_timeline.build_claim_timeline(
+            {**c,'investigation_id':case_id},operations=c['latest_operations'],human_reviews=human_rows,
+            reformulations=reformulations,scope_history=scope_history,legacy_source_checks=legacy_checks,
+            revisions=revision_rows)
     return rows
 
 
@@ -575,10 +669,14 @@ class Handler(BaseHTTPRequestHandler):
                 if rows is None:raise ValueError('Expediente inexistente')
                 claim_id=data.get('claim_id')
                 if claim_id and not any(c['id']==claim_id for c in rows):raise ValueError('Afirmación inexistente')
+                claim_ids=[claim_id] if claim_id else sorted({c['id'] for c in rows if any(e.get('type')=='external' for e in c.get('evidence',[]))})
+                operation_inputs={'claim_ids':claim_ids}
                 with LOCK:
+                    active=active_operation('technical_check',cid,claim_id,operation_inputs)
+                    if active:return self.respond({'operation_id':active['id'],'kind':'technical_check','deduplicated':True})
                     if JOB['status']=='running' or (INTEL/'pipeline.lock').exists():
                         return self.respond({'error':'Espera a que termine la ejecución activa'},409)
-                    operation,created=operation_start('technical_check',cid,claim_id)
+                    operation,created=operation_start('technical_check',cid,claim_id,operation_inputs)
                     if created:JOB.update(status='running',log='',stage='Comprobando acceso y pasajes',case_id=cid,operation_id=operation['id'])
                 if created:threading.Thread(target=check_case_sources,args=(cid,claim_id,operation['id']),daemon=True).start()
                 return self.respond({'operation_id':operation['id'],'kind':'technical_check','deduplicated':not created})
@@ -602,13 +700,19 @@ class Handler(BaseHTTPRequestHandler):
                 inputs={'evidence_mode':evidence_mode,'document_ids':sorted(set(document_ids)),
                         'claim_sha256':hashlib.sha256(next(c['claim'] for c in rows if c['id']==claim_id).encode()).hexdigest(),
                         'claim_version':next((c.get('claim_version',1) for c in rows if c['id']==claim_id),1)}
+                new_run=data.get('new_run',False)
+                if type(new_run) is not bool:raise ValueError('new_run debe ser booleano')
                 with LOCK:
+                    active=active_operation('claim_research',cid,claim_id,inputs)
+                    if active:return self.respond({'operation_id':active['id'],'kind':'claim_research','deduplicated':True,'status':active.get('status')})
                     if JOB['status']=='running' or (INTEL/'pipeline.lock').exists():
                         return self.respond({'error':'Espera a que termine la ejecución activa'},409)
-                    operation,created=operation_start('claim_research',cid,claim_id,inputs)
+                    operation,created=operation_start('claim_research',cid,claim_id,inputs,new_run=new_run)
                     if created:JOB.update(status='running',log='',stage='Preparando investigación automática',case_id=cid,operation_id=operation['id'])
                 if created:threading.Thread(target=automatic_claim_research,args=(cid,claim_id,operation['id']),daemon=True).start()
-                return self.respond({'operation_id':operation['id'],'kind':'claim_research','deduplicated':not created})
+                return self.respond({'operation_id':operation['id'],'kind':'claim_research','deduplicated':not created,
+                                     'new_run':bool(operation.get('new_run')),
+                                     'retry':bool(not new_run and (operation.get('retry_requested_at') or operation.get('attempt_history')))})
             mode = data.get('mode')
             if mode not in ('research','document','resume','sync','changelog','reevaluate','scope'): raise ValueError('Acción inválida.')
             with LOCK:
