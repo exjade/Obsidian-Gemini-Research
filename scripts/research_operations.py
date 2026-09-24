@@ -102,13 +102,14 @@ class OperationStore:
             raise ValueError("Selecciona documentos para este modo de evidencia")
         input_fingerprint=stable_digest({"claim_id":claim_id,"claim":claim,"claim_version":claim_version,
             "evidence_mode":evidence_mode,"document_ids":document_ids,"dimension_schema":1})
+        requested_at=utcnow()
         record = {
             "policy": POLICY, "operation_id": operation_id, "kind": "claim_research",
             "case_id": case_id, "claim_id": claim_id, "claim": claim,
             "claim_version":claim_version,"evidence_mode":evidence_mode,"document_ids":document_ids,
             "input_fingerprint":input_fingerprint,
             "status": "queued", "stage": "queued", "profile": PROFILE_NAME,
-            "created_at": utcnow(), "updated_at": utcnow(), "round": 0,
+            "requested_at":requested_at,"created_at": requested_at, "updated_at": requested_at, "round": 0,
             "progress": {"queries": 0, "pages": 0, "elapsed_seconds": 0},
             "result": None, "error": None,
         }
@@ -159,6 +160,20 @@ class OperationStore:
 
     def update(self, operation_id: str, **changes: Any) -> dict[str, Any]:
         record = self.load(operation_id)
+        previous_status=record.get("status");new_status=changes.get("status")
+        now=utcnow()
+        if new_status=="running" and previous_status!="running":
+            attempts=record.setdefault("attempt_history",[])
+            number=len(attempts)+1
+            attempts.append({"number":number,"started_at":now})
+            record.setdefault("started_at",now)
+            record["finished_at"]=None
+        if new_status in {"resolved","completed_with_limits","failed","done","error","cancelled"}:
+            record["finished_at"]=now
+            attempts=record.get("attempt_history") or []
+            if attempts and not attempts[-1].get("finished_at"):
+                attempts[-1].update(finished_at=now,status=new_status)
+                if changes.get("error"):attempts[-1]["error"]=changes["error"]
         record.update(changes, updated_at=utcnow())
         _atomic_json(self.folder(operation_id) / "operation.json", record)
         return record
@@ -792,10 +807,12 @@ class ResearchOrchestrator:
                         raise AgentOutputError(
                             "El plan presupuestario conservado no coincide con la entrada validada; "
                             "se detuvo para no cambiar límites durante un reintento.")
+                    self.store.update(operation["operation_id"], budget_plan=existing)
                     return existing
             except (OSError, json.JSONDecodeError) as exc:
                 raise AgentOutputError("No se pudo verificar el plan presupuestario conservado.") from exc
         self.store.artifact(operation["operation_id"], "budget-plan", plan)
+        self.store.update(operation["operation_id"], budget_plan=plan)
         return plan
 
     def _checkpoint(self, operation_id: str, role: str, stage: str, round_number: int) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
@@ -1236,7 +1253,7 @@ def get_operation(root: str | Path, operation_id: str) -> dict[str, Any] | None:
         return None
 
 
-def operations_for_claim(root: str | Path, case_id: str, claim_id: str, limit: int = 8) -> list[dict[str, Any]]:
+def operations_for_claim(root: str | Path, case_id: str, claim_id: str, limit: int | None = None) -> list[dict[str, Any]]:
     rows = []
     base = store(root).root
     if not base.exists():
@@ -1249,7 +1266,7 @@ def operations_for_claim(root: str | Path, case_id: str, claim_id: str, limit: i
         if row.get("case_id") == case_id and row.get("claim_id") == claim_id:
             rows.append(row)
     rows.sort(key=lambda row: row.get("updated_at", ""), reverse=True)
-    return rows[:limit]
+    return rows[:limit] if limit else rows
 
 
 def _affected_conclusions(root: str | Path, case_id: str, current_claim_id: str, matrices) -> list[dict[str, str]]:
@@ -1400,15 +1417,20 @@ def _persist_projection(root: Path, operation: Mapping[str, Any]) -> None:
             claim["bounded_resolution"] = result.get("bounded_resolution")
             scientific=result.get('scientific_resolution')
             if scientific:
-                claim.setdefault('scientific_resolution_history',[]).append(scientific)
+                scientific={**scientific,'operation_id':operation['operation_id']}
+                history=claim.setdefault('scientific_resolution_history',[])
+                if not any(row.get('resolution_id')==scientific.get('resolution_id') for row in history if isinstance(row,dict)):
+                    history.append(scientific)
                 claim['scientific_resolution']=scientific
-                claim['dimension_matrix_history']=claim.get('dimension_matrix_history',[])+[
-                    {'resolution_id':scientific['resolution_id'],'input_fingerprint':scientific['input_fingerprint'],
-                     'dimensions':scientific['dimensions'],'created_at':scientific['created_at']}]
-            claim.setdefault("automatic_research_history", []).append({
-                "operation_id": operation["operation_id"], "finished_at": operation.get("updated_at"),
-                "outcome": result.get("outcome"), "historical_verdict_changed": False,
-            })
+                matrices=claim.setdefault('dimension_matrix_history',[])
+                if not any(row.get('resolution_id')==scientific.get('resolution_id') for row in matrices if isinstance(row,dict)):
+                    matrices.append({'resolution_id':scientific['resolution_id'],'input_fingerprint':scientific['input_fingerprint'],
+                        'dimensions':scientific['dimensions'],'created_at':scientific['created_at'],'operation_id':operation['operation_id']})
+                claim['scientific_resolution_operation_id']=operation['operation_id']
+            history=claim.setdefault("automatic_research_history", [])
+            if not any(row.get('operation_id')==operation['operation_id'] for row in history if isinstance(row,dict)):
+                history.append({"operation_id": operation["operation_id"], "finished_at": operation.get("finished_at"),
+                    "outcome": result.get("outcome"), "historical_verdict_changed": False})
             library.save(folder / "claims.json", rows)
             break
     except (OSError, ValueError, KeyError):
