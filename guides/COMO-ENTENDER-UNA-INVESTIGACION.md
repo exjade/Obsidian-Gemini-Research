@@ -33,7 +33,22 @@ El recorrido principal y los botones usan exactamente este orden:
 
 Las herramientas de consulta aparecen en otra fila. Fichas de afirmaciones reúne todos los candidatos, pendientes y evaluados, y permite abrir sus fuentes y reevaluarlos. Auditoría prioriza revisiones; Actividad explica qué ocurrió. Ninguna es una etapa adicional. Artefactos es una función futura.
 
-Actividad muestra hechos registrados: propuesta de hipótesis, comprobaciones de fuentes, evaluaciones, solicitudes y actualizaciones de reevaluación, informes generados y errores. Es una reconstrucción de registros conservados, no un historial de acciones ausentes. Las herramientas concretas se consultan en «Recorrido comprobable» de la ficha.
+Actividad recibe del backend la misma proyección temporal canónica que se muestra en la cronología completa de cada afirmación. La vista de Actividad sólo presenta esa lista ya ordenada junto con eventos persistidos del expediente que no pertenecen a una afirmación; no vuelve a reconstruir revisiones, operaciones ni comprobaciones desde arrays paralelos. El resumen de Actividad en Inicio usa un subconjunto de esa lista. Refrescar reemplaza el snapshot completo, por lo que no acumula copias. Los enlaces de eventos de afirmación abren su ficha. Una ejecución vieja sin fecha conserva «Fecha no registrada».
+
+Estos registros contestan preguntas distintas y permanecen separados:
+
+| Registro | Qué significa | Qué no significa |
+| --- | --- | --- |
+| Investigación automática | Una operación `claim_research` con entradas, modo, estado, resultado o error. | No equivale a un cambio del veredicto y puede terminar sin resolver la afirmación. |
+| Veredicto histórico | Una transición de evaluación persistida para el claim. | Una búsqueda, fallo o respuesta HTTP no lo cambia por sí sola. |
+| Resolución científica | La conclusión, dimensiones cubiertas y límites asociados a una evaluación científica. | No reemplaza ni reescribe el veredicto histórico. |
+| Comprobación técnica (`technical_check`) | Acceso, redirecciones y presencia/recuperabilidad de pasajes conocidos. | No busca estudios nuevos ni decide pertinencia científica. |
+| Revisión humana | Decisión, fuentes examinadas y límites declarados por una persona. | No se vuelve evidencia automática ni modifica por sí sola el veredicto. |
+| Reformulación | Propuesta versionada y relación explícita entre claim padre e hijo si se aprueba. | No modifica el padre ni hereda evidencia o veredicto automáticamente. |
+
+La ficha conserva además historiales especializados por tipo de registro. Son vistas para consultar esos datos; Actividad y la cronología completa usan la proyección común para evitar que un mismo evento aparezca con distinto orden o significado. No incluye acciones en vivo que no hayan quedado persistidas.
+
+Una nueva investigación deliberada crea otro identificador y conserva el resultado anterior. Un reintento de una operación fallida reutiliza su identidad y checkpoints. Si el último intento falla, el bloque **Resultado científico vigente** sigue señalando el último resultado terminado y **Último intento** muestra el error de esa operación. No hace falta leer registros técnicos para distinguirlos. Las herramientas observables de evaluaciones históricas se consultan en «Recorrido comprobable».
 
 Auditoría prioriza claims sensibles o potencialmente favorables; no prueba que un auditor externo los haya revisado. Artefactos corresponde a Studio, todavía sin implementar.
 

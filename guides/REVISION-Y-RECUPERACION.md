@@ -5,7 +5,9 @@ Cuando Collector finaliza, el programa valida su respuesta y conserva un checkpo
 
 Sólo sirve durante seis horas, para las mismas entradas, alcance, contratos, política y documentos. Si cambia un archivo utilizado, una extracción, revisión de identidad o material, se vuelve a recopilar. El registro explica qué se reutilizó y conserva las rutas del Collector original. Un fallo de Collector, salida parcial o archivo .raw.json antiguo no se importa automáticamente.
 
-Reevaluar explícitamente una ficha crea otra solicitud; sus nuevos datos invalidan la reutilización anterior. El timeout sigue siendo 900 segundos por llamada, no por expediente completo. El checkpoint reduce repeticiones; no garantiza una duración máxima de toda la investigación.
+**Reintentar** y **Investigar de nuevo** son acciones distintas. Reintentar una operación fallida conserva su `operation_id`, fecha de solicitud original, intentos posteriores y checkpoints válidos. Investigar de nuevo crea otro `operation_id`, con su modo y documentos seleccionados, y conserva todas las ejecuciones anteriores. Los clics duplicados mientras la misma operación está en espera o en curso se agrupan; una operación terminada no bloquea otra nueva.
+
+En la ficha, **Resultado científico vigente** identifica el resultado terminado más reciente. **Último intento** describe la solicitud más reciente, incluso si falló; el error y su etapa se leen desde el detalle de esa operación, no del estado global del servicio. Una comprobación técnica de URL/pasaje va en su historial técnico: no equivale a volver a investigar ni borra errores anteriores. El timeout sigue siendo 900 segundos por llamada, no por expediente completo. El checkpoint reduce repeticiones; no garantiza una duración máxima de toda la investigación.
 
 ## Leer el progreso
 «Pendiente 1 de 2» describe esta ejecución; «alcance: 3» describe las hipótesis admitidas; «evaluaciones anteriores conservadas: 1» explica lo que no se repite. Tener un veredicto registrado no significa estar científicamente resuelto. La pantalla conserva la distinción y explica cómo recuperar un timeout o una revisión no validada.

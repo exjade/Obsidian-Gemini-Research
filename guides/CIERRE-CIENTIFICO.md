@@ -10,6 +10,8 @@ La ejecución puede terminar sin que la investigación esté resuelta. La aplica
 
 La barra de cinco etapas sólo mide trabajo registrado. No demuestra que haya respaldo suficiente ni sustituye este control.
 
+La fecha en que una investigación termina no equivale a la fecha en que cambió el veredicto ni a la fecha en que se registró una resolución científica. La ficha conserva esas tres historias por separado, junto con comprobaciones técnicas, revisiones humanas y reformulaciones. Una comprobación de página no cierra una hipótesis.
+
 ## Qué permite avanzar
 
 Una hipótesis VERIFIED debe cumplir la política actual y conservar evidencia comprobable, revisión crítica y búsqueda de contradicciones. Una hipótesis CONTRADICTED necesita un pasaje identificado explícitamente como refutación y comprobado contra la evidencia conservada. Una ficha con resolución científica v1 usa esa resolución separada del veredicto histórico, pero el cierre vuelve a validar su política, versión, identidad/hash del claim, matriz de dimensiones, pasajes y criterios. Los registros antiguos sin esa proyección siguen usando el control compatible con su veredicto histórico. No basta con que no se haya encontrado apoyo.

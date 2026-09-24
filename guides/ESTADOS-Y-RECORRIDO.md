@@ -13,6 +13,19 @@ La pantalla separa dos preguntas: ¿terminó la ejecución? y ¿qué respaldo ti
 
 La ficha conserva cuándo se solicitó, su última actualización, el estado anterior y el nuevo, y si Obsidian se sincronizó. Una revisión puede acabar correctamente con UNSUPPORTED. Si falla Writer, el veredicto puede estar guardado mientras Resultados conserva la publicación anterior.
 
+Una afirmación puede tener muchas investigaciones. **Historial de investigaciones** conserva cada operación por separado. «Investigar de nuevo» crea una operación nueva; «Reintentar el intento fallido» continúa la operación y sus checkpoints. El último intento fallido no reemplaza el último resultado científico terminado. La ficha muestra ambos y el error pertenece a la operación que falló.
+
+Los historiales de evaluación/veredicto y de resolución científica son independientes. Una comprobación técnica de acceso y pasajes tampoco es una investigación: no busca nuevos estudios ni cambia el veredicto. Las revisiones humanas y propuestas de reformulación conservan sus propios registros. **Actividad** y **Cronología completa** usan los mismos eventos canónicos preparados por el servidor; Actividad combina esas cronologías de afirmaciones con eventos persistidos del expediente que no pertenecen a una afirmación. No vuelve a reconstruir los historiales especializados ni cambia su significado. Las dos vistas conservan el orden estable del backend, evitan repetir un evento con su mismo ID y apuntan a rutas existentes. Una fecha ausente se muestra como no registrada, nunca se deduce del orden de archivos.
+
+Lee cada categoría según el registro que la produjo:
+
+- **Investigación automática:** una operación `claim_research`, con su modo, estado, resultado o error. Puede terminar sin cambiar el veredicto.
+- **Veredicto histórico:** transición de evaluación guardada para la afirmación; una investigación fallida o una comprobación técnica no la modifica por sí sola.
+- **Resolución científica:** conclusión y límites registrados para una versión de la afirmación; se conserva separada del veredicto histórico.
+- **Comprobación técnica (`technical_check`):** acceso HTTP, redirecciones y pasajes conocidos; no busca estudios nuevos ni determina apoyo científico.
+- **Revisión humana:** observación, decisión y límites declarados; no se convierte automáticamente en evidencia o veredicto.
+- **Reformulación:** propuesta y, si se aprueba, vínculo entre el texto padre y una versión hija; no cambia el padre ni transfiere evidencia o veredicto automáticamente.
+
 Las futuras ejecuciones muestran la pasada activa: hipótesis, evidencia, revisión crítica y publicación. No estimamos porcentajes ni tiempo restante. Si el servicio se desconecta, el frontend avisa que no puede confirmar la finalización.
 
 ## Recorrido comprobable

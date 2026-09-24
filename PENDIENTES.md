@@ -46,7 +46,9 @@ No exigir usar todo el archivo contextual: cubrir el alcance aprobado y consider
 - [x] Ficha individual con evidencia, motivo registrado y siguientes acciones; mejorar aún la explicación automática de motivos.
 - [x] Mostrar por afirmación huecos de recuperación comprobados, separados del motivo del modelo. La evaluación automática nueva conserva auditoría claim-pasaje; la revisión humana del apoyo completo sigue siendo opcional y separada.
 - [x] Incorporar enlaces/texto de apoyo a una afirmación del mismo expediente con historial de solicitudes.
-- [x] Solicitar nueva búsqueda/revisión de una afirmación ya clasificada desde su ficha. El botón general Reintentar conserva su comportamiento para etapas pendientes/Writer.
+- [x] Solicitar nuevas investigaciones o revisiones desde la ficha de una afirmación ya clasificada.
+  - [x] Conservar la revisión supervisada y su historial de solicitudes.
+  - [x] Permitir «Investigar de nuevo» con operación independiente tras resultados terminados; distinguirlo del retry, conservar el resultado anterior y el historial hasta que el nuevo cierre, y agrupar clics concurrentes equivalentes.
 - [x] Revisión humana opcional registrada por ficha: actor declarado, fecha, evidencia examinada congelada, observación y límites; historial y exportación a Obsidian. No cambia veredictos ni el cierre científico. Autenticación de identidad humana pendiente.
 
 ## H2 — Nuevo bloque: evidencia documental local (2026-09-18)
@@ -100,12 +102,17 @@ Primera implementación documental local disponible; ver guides/ENTREGA-PDF-Y-DO
 
 ## Prioridad 3 — H3–H4: trazabilidad y método
 
-- [ ] H3 completo: operaciones muestran etapa y presupuesto cada cuatro segundos; total previo al recorte, omitidas, consultas agrupadas, manifiestos y descarga completa implementados. Streaming por herramienta y tiempos individuales siguen pendientes.
+- [ ] H3: trazabilidad comprobable de las operaciones.
+  - [x] Mostrar etapa, presupuesto, recorte, consultas agrupadas, manifiestos y descarga completa.
+  - [x] Historial durable por afirmación para investigaciones, errores scoped y comprobaciones técnicas; la cronología del claim y Actividad consumen una proyección backend compartida, con orden estable, deduplicación por identidad y enlaces a la ficha.
+  - [ ] Transmitir cada herramienta durante la ejecución.
+  - [ ] Registrar y presentar duración individual de cada herramienta cuando el proveedor la exponga.
 - [ ] Explicación del veredicto enlazada con evidencia a favor/en contra y regla aplicada.
 - [x] Separar explicación del modelo de eventos observados; atribución y acciones reutilizadas identificadas. No se promete pensamiento interno completo.
-- [ ] H4: pregunta, subpreguntas, hipótesis competidoras, criterios de refutación, cronología y límites.
+- [ ] H4: método comprobable por hipótesis.
   - [x] Primera entrega versionada por claim: subpreguntas, hipótesis competidoras y criterios de refutación.
-  - [ ] Completar cronología, límites metodológicos y cobertura H4 por dominio.
+  - [x] Proyectar una cronología durable por claim con identidades estables, orden determinista y fechas faltantes explícitas; Actividad reutiliza esa proyección y separa investigaciones, cambios de veredicto, resoluciones, comprobaciones, revisión humana y reformulaciones.
+  - [ ] Completar límites metodológicos y cobertura H4 por dominio.
 - [ ] Rúbrica explicable de fuerza de evidencia; sin inventar probabilidad de verdad ni anular contradicciones con un puntaje.
   - [x] Primera rúbrica categórica por dimensión/pasaje, sin probabilidades de verdad y conservando evidencia mixta.
   - [ ] Calibrar y documentar la rúbrica para dominios y diseños de estudio distintos.
@@ -136,7 +143,7 @@ Ver ROADMAP.md para criterios de aceptación y dependencias. La primera entrega 
 
 ## Claridad de estados y revisión
 
-Implementado: aviso visible de ejecución y reevaluación, señales de error y pendientes, auditoría estructurada, aclaración de vistas vacías, recorrido de herramientas conservado y avisos nativos en Obsidian. Pendiente: transmisión de herramientas en vivo y atribución exclusiva de acciones a cada afirmación en lotes. Guía: [Estados y recorrido](guides/ESTADOS-Y-RECORRIDO.md).
+Implementado: aviso global separado de errores por operación; resultado científico vigente separado del último intento; Actividad y cronología derivadas de registros persistidos y de la misma proyección backend; auditoría estructurada, vistas vacías explicadas y avisos nativos en Obsidian. Pendiente: transmisión de herramientas en vivo y atribución exclusiva de acciones a cada afirmación en lotes. Guía: [Estados y recorrido](guides/ESTADOS-Y-RECORRIDO.md).
 
 
 ## Guía y actividad de investigación
@@ -160,7 +167,9 @@ El botón Ampliar alcance revisa candidatos fuera del alcance, mantiene los admi
 ## Corrección de fallos de investigación
 
 - [x] Permitir que Skeptic corrija clasificación de fuentes sin perder payloads originales; cambios trazados y protección de URLs/documentos/extractos.
-- [x] Conservar en futuras fallas el error específico del proceso en el frontend.
+- [x] Conservar y presentar errores específicos sin mezclarlos con el estado global.
+  - [x] Mostrar errores del proceso general en la interfaz.
+  - [x] Asociar errores de `claim_research` a su operación persistente y presentarlos junto al historial, aunque exista un resultado anterior vigente.
 - [x] Recuperación de Collector validado y trazabilidad del origen; nuevas comprobaciones externas al revisar. Ver guides/REVISION-Y-RECUPERACION.md.
 
 ## Continuidad segura hacia ChatGPT web — 2026-09-18
