@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -18,7 +19,7 @@ from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from research_agents import (
-    AgentCall, AgentOutputError, DIMENSIONS, RELATIONS,
+    AgentCall, AgentOutputError, DIMENSIONS, RELATIONS, PlannerContradictionCoverageError,
     RELEVANCE_MATRIX_STRUCTURE_ORIGIN, RELEVANCE_MATRIX_STRUCTURE_POLICY,
     stable_digest, validate_agent_output,
 )
@@ -29,13 +30,14 @@ POLICY = "automatic-claim-research-v2"
 PROFILE_NAME = "three-rounds-v1"
 EVIDENCE_MODES = {"question_search", "documents_only", "documents_plus_search"}
 ROUNDS = (
-    {"number": 1, "name": "direct_primary", "query_limit": 6, "page_limit": 8},
-    {"number": 2, "name": "identity_recovery", "query_limit": 4, "page_limit": 8},
-    {"number": 3, "name": "gaps_contradictions", "query_limit": 6, "page_limit": 8},
+    {"number": 1, "name": "direct_primary"},
+    {"number": 2, "name": "identity_recovery"},
+    {"number": 3, "name": "gaps_contradictions"},
 )
 GLOBAL_QUERY_LIMIT = 16
 GLOBAL_PAGE_LIMIT = 24
 GLOBAL_SECONDS_LIMIT = 30 * 60
+ADAPTIVE_BUDGET_POLICY = "planner-matrix-adaptive-v1"
 
 
 class BudgetExceeded(RuntimeError):
@@ -180,6 +182,96 @@ def normalize_query(value: str) -> str:
     return " ".join(value.split())
 
 
+def _planner_complexity(planner: Mapping[str, Any]) -> dict[str, Any]:
+    """Measure only non-empty dimensions and hypotheses from validated planner output."""
+    matrix = planner.get("matrix", {})
+    matrix = matrix if isinstance(matrix, Mapping) else {}
+    dimensions = [key for key in DIMENSIONS
+                  if isinstance(matrix.get(key), str) and matrix[key].strip()]
+    hypotheses = planner.get("competing_hypotheses", [])
+    hypotheses = hypotheses if isinstance(hypotheses, list) else []
+    useful_hypotheses = [value.strip() for value in hypotheses
+                         if isinstance(value, str) and value.strip()]
+    return {"declared_dimensions": dimensions, "dimension_count": len(dimensions),
+            "effective_dimension_count": max(1, len(dimensions)),
+            "competing_hypotheses_counted": min(2, len(useful_hypotheses)),
+            "competing_hypotheses_total": len(useful_hypotheses)}
+
+
+def _adaptive_budget_plan(planner: Mapping[str, Any], evidence_mode: str) -> dict[str, Any]:
+    """Build bounded, deterministic query/page/target capacity from canonical planner output."""
+    if evidence_mode not in EVIDENCE_MODES:
+        raise ValueError("Modo de evidencia inválido para el presupuesto adaptativo")
+    complexity = _planner_complexity(planner)
+    d_eff = complexity["effective_dimension_count"]
+    hypothesis_bonus = complexity["competing_hypotheses_counted"]
+    query_base = 9 + d_eff
+    page_base = 16 + math.ceil((d_eff - 1) * 8 / 6)
+    query_bonus = hypothesis_bonus
+    page_bonus = 2 * hypothesis_bonus
+    target_cap = min(GLOBAL_QUERY_LIMIT, query_base + query_bonus)
+    web_query_cap = 0 if evidence_mode == "documents_only" else target_cap
+    page_cap = min(GLOBAL_PAGE_LIMIT, page_base + page_bonus)
+    return {
+        "policy": ADAPTIVE_BUDGET_POLICY,
+        "evidence_mode": evidence_mode,
+        **complexity,
+        "minimums": {"search_queries": 10, "pages": 16},
+        "effective_minimums": {"search_queries": 0 if evidence_mode == "documents_only" else 10,
+                               "pages": 16},
+        "formula": {"query_base": query_base, "query_bonus": query_bonus,
+                    "page_base": page_base, "page_bonus": page_bonus,
+                    "hypothesis_bonus_limit": 2},
+        "operation_query_cap": web_query_cap,
+        "target_cap": target_cap,
+        "operation_page_cap": page_cap,
+        "hard_global_caps": {"queries": GLOBAL_QUERY_LIMIT, "pages": GLOBAL_PAGE_LIMIT,
+                             "seconds": GLOBAL_SECONDS_LIMIT},
+        "maximums": {"search_queries": GLOBAL_QUERY_LIMIT, "pages": GLOBAL_PAGE_LIMIT,
+                     "seconds": GLOBAL_SECONDS_LIMIT},
+        "round_names": [row["name"] for row in ROUNDS],
+        "round_allocation": "equal_remaining_pool_ceil_v1",
+        "page_pool": "shared_local_and_web_unique_pages",
+    }
+
+
+def _round_grant(remaining: int, rounds_left: int) -> int:
+    return max(0, math.ceil(max(0, remaining) / max(1, rounds_left)))
+
+
+def _target_key(target: Mapping[str, Any]) -> str:
+    return stable_digest({"query": normalize_query(str(target.get("query", ""))),
+                          "purpose": target.get("purpose"),
+                          "dimension_ids": sorted(set(target.get("dimension_ids", [])))})
+
+
+def _round_robin_targets(targets: Iterable[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Select targets by purpose in stable turns, retaining each target verbatim."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for target in targets:
+        if not isinstance(target, Mapping):
+            continue
+        groups.setdefault(str(target.get("purpose", "")), []).append(dict(target))
+    ordered_purposes = [purpose for purpose in ("support", "contradiction", "identity_recovery")
+                        if purpose in groups]
+    ordered_purposes.extend(purpose for purpose in groups if purpose not in ordered_purposes)
+    output: list[dict[str, Any]] = []
+    indexes = {purpose: 0 for purpose in ordered_purposes}
+    while len(output) < max(0, limit):
+        progressed = False
+        for purpose in ordered_purposes:
+            index = indexes[purpose]
+            if index < len(groups[purpose]):
+                output.append(groups[purpose][index])
+                indexes[purpose] += 1
+                progressed = True
+                if len(output) >= limit:
+                    break
+        if not progressed:
+            break
+    return output
+
+
 def normalize_doi(value: str) -> str:
     value = value.strip().casefold()
     value = re.sub(r"^(https?://(dx\.)?doi\.org/|doi:\s*)", "", value)
@@ -216,6 +308,10 @@ def page_keys(row: Mapping[str, Any]) -> set[str]:
         if row.get(name):keys.add(prefix+normalizer(str(row[name])))
     for name in ("url","final_url"):
         if row.get(name):keys.add("url:"+normalize_url(str(row[name])))
+    document_digest = row.get("document_sha256")
+    physical_page = row.get("physical_page", row.get("page"))
+    if isinstance(document_digest, str) and document_digest.strip() and physical_page is not None:
+        keys.add(f"document-page:{document_digest.strip().casefold()}:{physical_page}")
     return keys or {page_key(row)}
 
 
@@ -548,13 +644,57 @@ class BudgetLedger:
     pages: set[str] = field(default_factory=set)
     round_queries: set[str] = field(default_factory=set)
     round_pages: set[str] = field(default_factory=set)
+    targets: set[str] = field(default_factory=set)
+    round_targets: set[str] = field(default_factory=set)
     round_profile: Mapping[str, Any] | None = None
     page_count: int = 0
     round_page_count: int = 0
+    budget_plan: Mapping[str, Any] | None = None
+    round_grants: dict[str, int] = field(default_factory=dict)
+
+    def configure(self, budget_plan: Mapping[str, Any]) -> None:
+        self.budget_plan = dict(budget_plan)
+
+    def _pool_remaining(self) -> dict[str, int]:
+        plan = self.budget_plan or {}
+        query_cap = min(GLOBAL_QUERY_LIMIT, int(plan.get("operation_query_cap", GLOBAL_QUERY_LIMIT)))
+        page_cap = min(GLOBAL_PAGE_LIMIT, int(plan.get("operation_page_cap", GLOBAL_PAGE_LIMIT)))
+        target_cap = min(GLOBAL_QUERY_LIMIT, int(plan.get("target_cap", GLOBAL_QUERY_LIMIT)))
+        return {"queries": max(0, query_cap - len(self.queries)),
+                "pages": max(0, page_cap - self.page_count),
+                "targets": max(0, target_cap - len(self.targets))}
 
     def begin_round(self, profile: Mapping[str, Any]) -> None:
         self.round_profile = profile
-        self.round_queries, self.round_pages = set(), set();self.round_page_count=0
+        self.round_queries, self.round_pages, self.round_targets = set(), set(), set()
+        self.round_page_count = 0
+        if self.budget_plan:
+            rounds_left = max(1, len(ROUNDS) - int(profile.get("number", 1)) + 1)
+            pool = self._pool_remaining()
+            self.round_grants = {
+                "queries": _round_grant(pool["queries"], rounds_left),
+                "pages": _round_grant(pool["pages"], rounds_left),
+                "targets": _round_grant(pool["targets"], rounds_left),
+            }
+        else:
+            # Direct ledger users without a planner retain only the hard
+            # operation ceilings; production orchestration always configures
+            # the adaptive plan before any retrieval round starts.
+            self.round_grants = {"queries": int(profile.get("query_limit", GLOBAL_QUERY_LIMIT)),
+                                 "pages": int(profile.get("page_limit", GLOBAL_PAGE_LIMIT)),
+                                 "targets": int(profile.get("query_limit", GLOBAL_QUERY_LIMIT))}
+
+    def observe_target(self, target: Mapping[str, Any]) -> dict[str, Any]:
+        key = _target_key(target)
+        reused = key in self.targets
+        if not reused:
+            grant = self.round_grants.get("targets", 0)
+            if len(self.targets) >= min(GLOBAL_QUERY_LIMIT, int((self.budget_plan or {}).get("target_cap", GLOBAL_QUERY_LIMIT))) \
+                    or len(self.round_targets) >= grant:
+                raise BudgetExceeded("Se agotó el presupuesto adaptativo de objetivos de recuperación.")
+            self.targets.add(key)
+            self.round_targets.add(key)
+        return {"kind": "target", "key": key, "reused": reused}
 
     @property
     def elapsed(self) -> float:
@@ -562,11 +702,18 @@ class BudgetLedger:
 
     def remaining(self) -> dict[str, int]:
         profile = self.round_profile or {"query_limit": 0, "page_limit": 0}
+        grants = self.round_grants if self.round_profile is not None else {"queries": 0, "pages": 0, "targets": 0}
+        pool = self._pool_remaining()
         return {
-            "round_queries": max(0, profile["query_limit"] - len(self.round_queries)),
-            "round_pages": max(0, profile["page_limit"] - self.round_page_count),
-            "global_queries": max(0, GLOBAL_QUERY_LIMIT - len(self.queries)),
-            "global_pages": max(0, GLOBAL_PAGE_LIMIT - self.page_count),
+            "round_queries": max(0, grants["queries"] - len(self.round_queries)),
+            "round_pages": max(0, grants["pages"] - self.round_page_count),
+            "round_targets": max(0, grants["targets"] - len(self.round_targets)),
+            "global_queries": min(GLOBAL_QUERY_LIMIT - len(self.queries), pool["queries"]),
+            "global_pages": min(GLOBAL_PAGE_LIMIT - self.page_count, pool["pages"]),
+            "adaptive_targets_remaining": pool["targets"],
+            "operation_query_cap": int((self.budget_plan or {}).get("operation_query_cap", GLOBAL_QUERY_LIMIT)),
+            "operation_page_cap": int((self.budget_plan or {}).get("operation_page_cap", GLOBAL_PAGE_LIMIT)),
+            "adaptive_target_cap": int((self.budget_plan or {}).get("target_cap", GLOBAL_QUERY_LIMIT)),
             "seconds": max(0, int(GLOBAL_SECONDS_LIMIT - self.elapsed)),
         }
 
@@ -580,7 +727,8 @@ class BudgetLedger:
                 raise AgentOutputError("Evento de consulta vacío.")
             reused = key in self.queries
             if not reused:
-                if len(self.queries) >= GLOBAL_QUERY_LIMIT or len(self.round_queries) >= self.round_profile["query_limit"]:
+                remaining = self.remaining()
+                if remaining["global_queries"] <= 0 or len(self.round_queries) >= self.round_grants.get("queries", 0):
                     raise BudgetExceeded("Se agotó el presupuesto de consultas.")
                 self.queries.add(key); self.round_queries.add(key)
             return {"kind": kind, "key": key, "reused": reused}
@@ -588,7 +736,8 @@ class BudgetLedger:
             keys = page_keys(event);key=sorted(keys)[0]
             reused = bool(keys & self.pages)
             if not reused:
-                if self.page_count >= GLOBAL_PAGE_LIMIT or self.round_page_count >= self.round_profile["page_limit"]:
+                remaining = self.remaining()
+                if remaining["global_pages"] <= 0 or self.round_page_count >= self.round_grants.get("pages", 0):
                     raise BudgetExceeded("Se agotó el presupuesto de páginas.")
                 self.page_count+=1;self.round_page_count+=1
             self.pages.update(keys);self.round_pages.update(keys)
@@ -599,6 +748,10 @@ class BudgetLedger:
         return {"round": round_number, "queries_new": len(self.round_queries),
                 "pages_new": self.round_page_count, "queries_total": len(self.queries),
                 "pages_total": self.page_count, "elapsed_seconds": round(self.elapsed, 3),
+                "targets_attempted": len(self.round_targets), "targets_total": len(self.targets),
+                "round_grant": dict(self.round_grants),
+                "shared_pool_remaining": self._pool_remaining(),
+                "budget_policy": (self.budget_plan or {}).get("policy", "legacy-fixed-round-v1"),
                 "remaining": self.remaining(), "stopped_reason": stopped_reason}
 
 
@@ -617,8 +770,33 @@ class ResearchOrchestrator:
                 "stage": "preflight" if round_profile is None else round_profile["name"],
                 "round": 0 if round_profile is None else round_profile["number"],
                 "budget_remaining": budget.remaining(),
+                "budget_policy": (budget.budget_plan or {}).get("policy"),
+                "budget_plan": dict(budget.budget_plan or {}),
+                "round_grant": dict(budget.round_grants),
+                "shared_pool_remaining": budget._pool_remaining(),
                 "queries_already_performed": sorted(budget.queries),
                 "pages_already_retrieved": sorted(budget.pages), "created_at": utcnow()}
+
+    def _persist_budget_plan(self, operation: Mapping[str, Any], planner: Mapping[str, Any]) -> dict[str, Any]:
+        plan = _adaptive_budget_plan(planner, operation.get("evidence_mode", "question_search"))
+        plan.update(operation_id=operation["operation_id"],
+                    input_fingerprint=operation.get("input_fingerprint"),
+                    planner_digest=stable_digest(planner))
+        folder = self.store.folder(operation["operation_id"]) / "artifacts" / "budget-plan"
+        for path in sorted(folder.glob("*.json")) if folder.exists() else []:
+            try:
+                envelope = json.loads(path.read_text(encoding="utf-8"))
+                if envelope.get("canonical") is True:
+                    existing = envelope.get("value")
+                    if existing != plan:
+                        raise AgentOutputError(
+                            "El plan presupuestario conservado no coincide con la entrada validada; "
+                            "se detuvo para no cambiar límites durante un reintento.")
+                    return existing
+            except (OSError, json.JSONDecodeError) as exc:
+                raise AgentOutputError("No se pudo verificar el plan presupuestario conservado.") from exc
+        self.store.artifact(operation["operation_id"], "budget-plan", plan)
+        return plan
 
     def _checkpoint(self, operation_id: str, role: str, stage: str, round_number: int) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
         """Return a previously validated agent result and its observable usage.
@@ -678,7 +856,8 @@ class ResearchOrchestrator:
         return events
 
     def _call(self, operation: Mapping[str, Any], role: str, payload: dict[str, Any],
-              budget: BudgetLedger, round_profile: Mapping[str, Any] | None) -> dict[str, Any]:
+              budget: BudgetLedger, round_profile: Mapping[str, Any] | None, *,
+              _planner_retry: bool = False) -> dict[str, Any]:
         stage = "preflight" if round_profile is None else round_profile["name"]
         round_number = 0 if round_profile is None else round_profile["number"]
         cached = self._checkpoint(operation["operation_id"], role, stage, round_number)
@@ -695,7 +874,11 @@ class ResearchOrchestrator:
                                         "elapsed_seconds": round(budget.elapsed, 3),
                                         "remaining": budget.remaining()})
             return result
-        prior_events = self._prior_attempt_events(operation["operation_id"], role, stage, round_number)
+        # A semantic planner retry happens inside this call. Its first attempt's
+        # events were already observed before validation, so do not replay them
+        # into the live budget a second time.
+        prior_events = ([] if _planner_retry else
+                        self._prior_attempt_events(operation["operation_id"], role, stage, round_number))
         for event in prior_events:
             budget.observe(event)
         if prior_events:
@@ -704,6 +887,13 @@ class ResearchOrchestrator:
                 "events_observed": len(prior_events), "replayed_at": utcnow(),
             }, canonical=False)
         manifest = self._manifest(operation, role, round_profile, budget)
+        if _planner_retry:
+            manifest["semantic_retry"] = {
+                "attempt": 2,
+                "reason": "missing_contradiction_dimension_coverage",
+                "missing_dimensions": list(payload.get("planner_retry", {}).get(
+                    "missing_contradiction_dimensions", [])),
+            }
         self.store.update(operation["operation_id"], stage=role,
                           progress={"queries": len(budget.queries), "pages": budget.page_count,
                                     "elapsed_seconds": round(budget.elapsed, 3),
@@ -757,7 +947,30 @@ class ResearchOrchestrator:
                 budget.observe(event)
         elif role == "relevance_evaluator":
             result = _normalize_relevance_matrix(result)
-        validated = validate_agent_output(role, result)
+        try:
+            validated = validate_agent_output(role, result)
+        except PlannerContradictionCoverageError as exc:
+            if role != "planner" or _planner_retry:
+                raise
+            missing = list(exc.missing_dimensions)
+            retry_payload = {
+                **payload,
+                "planner_retry": {
+                    "attempt": 2,
+                    "reason": "missing_contradiction_dimension_coverage",
+                    "missing_contradiction_dimensions": missing,
+                    "previous_invalid_output": result,
+                    "correction": (
+                        "Tu salida anterior no cubrió con purpose=contradiction estas dimensiones "
+                        f"declaradas: {', '.join(missing)}. Devuelve nuevamente el objeto completo. "
+                        "Mantén las consultas válidas existentes y añade o corrige targets de "
+                        "contradicción explícitos para cubrir todas las dimensiones declaradas. "
+                        "No conviertas ausencia de evidencia en contradicción."
+                    ),
+                },
+            }
+            return self._call(operation, role, retry_payload, budget, round_profile,
+                              _planner_retry=True)
         # Preserve the established in-process contract (notably locator query
         # receipts) while also storing a dedicated canonical usage-event list.
         if events:
@@ -856,10 +1069,14 @@ class ResearchOrchestrator:
             context.update(plan=planner, formulation={**formulation,"claim":operation["claim"],
                                                        "claim_id":operation["claim_id"],"plan":planner,
                                                        "input_fingerprint":operation.get("input_fingerprint")})
+            budget_plan = self._persist_budget_plan(operation, planner)
+            budget.configure(budget_plan)
+            context["budget_plan"] = budget_plan
             self.store.artifact(operation_id, "search-plan", context)
             receipts, audit, matrices = [], None, []
             for profile in ROUNDS:
                 budget.begin_round(profile)
+                round_grant = dict(budget.round_grants)
                 operation = self.store.update(operation_id, stage=profile["name"], round=profile["number"],
                                               progress={"queries": len(budget.queries), "pages": budget.page_count,
                                                         "elapsed_seconds": round(budget.elapsed, 3),
@@ -873,22 +1090,40 @@ class ResearchOrchestrator:
                     targets=[target for target in planner["retrieval_targets"]
                              if (set(target["dimension_ids"]) & set(gaps)) or
                              (target.get('purpose')=='contradiction' and target.get('query') not in searched_contradictions)]
-                    targets=targets[:budget.remaining()['round_queries']]
+                    target_limit = min(budget.remaining()["round_targets"], budget.remaining()["round_queries"]
+                                       if operation.get('evidence_mode') != 'documents_only' else
+                                       budget.remaining()["round_targets"])
+                    targets=_round_robin_targets(targets,target_limit)
                     round_context={**context,"round":profile,"gap_dimensions":gaps,
                                    "retrieval_targets":targets,
                                    "contradiction_targets":[target for target in targets if target["purpose"]=="contradiction"]}
                     if operation.get('evidence_mode')=='documents_only':
                         locator={'candidates':[]}
+                        for target in targets:
+                            budget.observe_target(target)
                         retriever=self._local_sources(operation,[target['query'] for target in targets])
                         for source in retriever['sources']:
                             for passage in source['passages']:
-                                budget.observe({'type':'page','source_id':source['source_id'],
+                                budget.observe({'type':'page','document_sha256':passage.get('document_sha256'),
+                                                'page':passage.get('page'),
                                                 'body_sha256':passage['evidence_id']})
                     else:
                         locator = self._call(operation, "locator", round_context, budget, profile)
+                        actual_queries={normalize_query(event.get('query','')) for event in locator.get('usage_events',[])
+                                        if event.get('type')=='query' and event.get('query')}
+                        searched_targets=[target for target in targets if normalize_query(target['query']) in actual_queries]
+                        for target in searched_targets:
+                            budget.observe_target(target)
                         retriever = self._call(operation, "retriever", {**round_context, "candidates": locator}, budget, profile)
                         if operation.get('document_ids'):
+                            for target in targets:
+                                budget.observe_target(target)
                             local=self._local_sources(operation,[target['query'] for target in targets])
+                            for source in local.get('sources',[]):
+                                for passage in source.get('passages',[]):
+                                    budget.observe({'type':'page','document_sha256':passage.get('document_sha256'),
+                                                    'page':passage.get('page'),
+                                                    'body_sha256':passage.get('evidence_id')})
                             known={source['source_id'] for source in retriever.get('sources',[])}
                             retriever['sources'].extend(source for source in local['sources'] if source['source_id'] not in known)
                     source_eval = self._call(operation, "source_evaluator", {**context, "sources": retriever}, budget, profile)
@@ -908,10 +1143,9 @@ class ResearchOrchestrator:
                     receipt = budget.receipt(profile["number"], stopped)
                     if operation.get('evidence_mode')=='documents_only':
                         searched_targets=targets
-                    else:
-                        actual_queries={normalize_query(event.get('query','')) for event in locator.get('usage_events',[])
-                                        if event.get('type')=='query' and event.get('query')}
-                        searched_targets=[target for target in targets if normalize_query(target['query']) in actual_queries]
+                    receipt["round_grant"] = round_grant
+                    receipt["round_consumption"] = {"queries": len(budget.round_queries),
+                        "pages": budget.round_page_count, "targets": len(budget.round_targets)}
                     receipt.update(target_dimensions=sorted({dimension for target in searched_targets for dimension in target["dimension_ids"]}),
                                    targeted_queries=[target["query"] for target in searched_targets],
                                    target_purposes=[target['purpose'] for target in searched_targets],
@@ -1087,6 +1321,19 @@ class PipelineProvider:
                 "autorizados que ya vienen en DATOS. Si no puedes recuperar un pasaje sin abrir una ruta "
                 "local, omite esa fuente o continúa con otro candidato permitido; no inventes extractos."
             )
+        if call.role == "planner" and call.manifest.get("semantic_retry", {}).get("reason") == \
+                "missing_contradiction_dimension_coverage":
+            missing = call.manifest["semantic_retry"].get("missing_dimensions", [])
+            if missing and all(dimension in DIMENSIONS for dimension in missing):
+                instructions += (
+                    "\n\nCORRECCIÓN DEL WRAPPER PARA ESTE REINTENTO: la salida anterior no cubrió "
+                    "con purpose=contradiction estas dimensiones declaradas: "
+                    + ", ".join(missing) + ". Devuelve nuevamente el objeto completo. Mantén los "
+                    "targets válidos y añade o corrige búsquedas explícitas de contradicción que "
+                    "examinen esas dimensiones. Un target identity_recovery o support no cuenta. "
+                    "No conviertas ausencia de evidencia en contradicción. La salida anterior está "
+                    "disponible en planner_retry.previous_invalid_output dentro de DATOS."
+                )
         if budget["max_search_queries"] == 0:
             instructions += ("\n\nRESTRICCIÓN DEL WRAPPER: quedan 0 consultas. No uses search_web. "
                              "Trabaja sólo con los candidatos, identificadores, URL y contenido recibido.")

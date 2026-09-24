@@ -47,6 +47,314 @@ class FakeProvider:
 
 
 class AutomaticResearchTests(unittest.TestCase):
+    @staticmethod
+    def _planner_result(*, missing_contradictions=(), empty_dimensions=()):
+        matrix={key:("" if key in empty_dimensions else f"declared {key}")
+                for key in research_agents.DIMENSIONS}
+        targets=[{"dimension_ids":[key for key in research_agents.DIMENSIONS
+                                  if key not in missing_contradictions and key not in empty_dimensions],
+                  "query":"Search directly for evidence against the declared dimensions.",
+                  "purpose":"contradiction"}]
+        targets=[row for row in targets if row["dimension_ids"]]
+        targets.append({"dimension_ids":[key for key in research_agents.DIMENSIONS if key not in empty_dimensions],
+                        "query":"Search for primary evidence supporting the stated dimensions.",
+                        "purpose":"support"})
+        return {"matrix":matrix,"gaps":[],"competing_hypotheses":["H1","H0"],
+                "falsification_criteria":["Direct contradictory result"],"retrieval_targets":targets}
+
+    def test_planner_requires_explicit_contradiction_coverage_only_for_declared_dimensions(self):
+        valid=self._planner_result()
+        self.assertEqual(research_agents.validate_agent_output('planner',valid),valid)
+
+        with self.assertRaises(research_agents.PlannerContradictionCoverageError) as raised:
+            research_agents.validate_agent_output(
+                'planner',self._planner_result(missing_contradictions={'population'}))
+        self.assertEqual(raised.exception.missing_dimensions,('population',))
+
+        empty=self._planner_result(empty_dimensions={'population'})
+        # The only contradiction target excludes the empty dimension.
+        self.assertNotIn('population',empty['retrieval_targets'][0]['dimension_ids'])
+        self.assertEqual(research_agents.validate_agent_output('planner',empty),empty)
+
+    def test_planner_support_and_identity_recovery_do_not_satisfy_contradiction_coverage(self):
+        result=self._planner_result(missing_contradictions={'population'})
+        result['retrieval_targets'].append({"dimension_ids":["population"],
+            "query":"Recover the identity of an already cited source.","purpose":"identity_recovery"})
+        with self.assertRaises(research_agents.PlannerContradictionCoverageError) as raised:
+            research_agents.validate_agent_output('planner',result)
+        self.assertEqual(raised.exception.missing_dimensions,('population',))
+
+        # One explicit contradiction target can cover every declared dimension.
+        multi=self._planner_result()
+        contradiction=[row for row in multi['retrieval_targets'] if row['purpose']=='contradiction']
+        self.assertEqual(len(contradiction),1)
+        self.assertEqual(set(contradiction[0]['dimension_ids']),set(research_agents.DIMENSIONS))
+        research_agents.validate_agent_output('planner',multi)
+
+    def test_adaptive_budget_formula_uses_nonempty_dimensions_and_bounded_hypotheses(self):
+        cases=((1,0,10,16),(3,0,12,19),(5,0,14,22),(7,0,16,24),
+               (1,1,11,18),(1,2,12,20),(5,3,16,24))
+        for dimensions,hypotheses,queries,pages in cases:
+            with self.subTest(dimensions=dimensions,hypotheses=hypotheses):
+                planner=self._planner_result()
+                planner['matrix']={key:(f'declared {key}' if index < dimensions else '')
+                                   for index,key in enumerate(research_agents.DIMENSIONS)}
+                planner['competing_hypotheses']=[f'H{index}' for index in range(hypotheses)]
+                plan=research_operations._adaptive_budget_plan(planner,'question_search')
+                self.assertEqual(plan['operation_query_cap'],queries)
+                self.assertEqual(plan['target_cap'],queries)
+                self.assertEqual(plan['operation_page_cap'],pages)
+                self.assertLessEqual(plan['operation_query_cap'],research_operations.GLOBAL_QUERY_LIMIT)
+                self.assertLessEqual(plan['operation_page_cap'],research_operations.GLOBAL_PAGE_LIMIT)
+        sparse=self._planner_result()
+        sparse['matrix']={'intervention':'', 'spacing':'   '}
+        sparse['competing_hypotheses']=['',None,'  ']
+        plan=research_operations._adaptive_budget_plan(sparse,'question_search')
+        self.assertEqual(plan['declared_dimensions'],[])
+        self.assertEqual(plan['operation_query_cap'],10)
+        self.assertEqual(plan['operation_page_cap'],16)
+        self.assertEqual(plan['competing_hypotheses_counted'],0)
+
+    def test_adaptive_budget_modes_keep_web_queries_separate_from_local_capacity(self):
+        planner=self._planner_result()
+        planner['matrix']={key:('x' if index < 3 else '') for index,key in enumerate(research_agents.DIMENSIONS)}
+        planner['competing_hypotheses']=[]
+        search=research_operations._adaptive_budget_plan(planner,'question_search')
+        local=research_operations._adaptive_budget_plan(planner,'documents_only')
+        combined=research_operations._adaptive_budget_plan(planner,'documents_plus_search')
+        self.assertEqual(search['operation_query_cap'],12)
+        self.assertEqual(local['operation_query_cap'],0)
+        self.assertEqual(local['target_cap'],12)
+        self.assertEqual(local['operation_page_cap'],19)
+        self.assertEqual(combined['operation_query_cap'],12)
+        self.assertEqual(combined['operation_page_cap'],19)
+        self.assertEqual(combined['page_pool'],'shared_local_and_web_unique_pages')
+
+    def test_adaptive_round_grants_redistribute_unused_shared_pool(self):
+        planner=self._planner_result()
+        planner['matrix']={key:'x' for key in research_agents.DIMENSIONS}
+        planner['competing_hypotheses']=[]
+        plan=research_operations._adaptive_budget_plan(planner,'question_search')
+        ledger=research_operations.BudgetLedger(0,clock=lambda:0)
+        ledger.configure(plan)
+        ledger.begin_round(research_operations.ROUNDS[0])
+        self.assertEqual(ledger.round_grants,{'queries':6,'pages':8,'targets':6})
+        for index in range(2):
+            ledger.observe({'type':'query','query':f'round one query {index}'})
+        for index in range(3):
+            ledger.observe({'type':'page','url':f'https://example.org/r1/{index}'})
+        for index in range(2):
+            ledger.observe_target({'purpose':'support','query':f'target-{index}',
+                                  'dimension_ids':['intervention']})
+        ledger.begin_round(research_operations.ROUNDS[1])
+        self.assertEqual(ledger.round_grants,{'queries':7,'pages':11,'targets':7})
+        receipt=ledger.receipt(2,'fixture')
+        self.assertEqual(receipt['shared_pool_remaining'],{'queries':14,'pages':21,'targets':14})
+        self.assertEqual(receipt['round_grant'],{'queries':7,'pages':11,'targets':7})
+
+        full=research_operations.BudgetLedger(0,clock=lambda:0)
+        full.configure(plan)
+        observed=[]
+        for profile in research_operations.ROUNDS:
+            full.begin_round(profile)
+            observed.append(full.round_grants['queries'])
+            for index in range(full.round_grants['queries']):
+                full.observe({'type':'query','query':f'{profile["name"]}-{index}'})
+        self.assertEqual(observed,[6,5,5])
+        self.assertEqual(len(full.queries),16)
+        with self.assertRaises(research_operations.BudgetExceeded):
+            full.observe({'type':'query','query':'seventeenth unique query'})
+
+    def test_adaptive_targets_round_robin_without_rewriting_target_semantics(self):
+        targets=[{'purpose':'support','query':'S1','dimension_ids':['intervention']},
+                 {'purpose':'support','query':'S2','dimension_ids':['spacing']},
+                 {'purpose':'contradiction','query':'C1','dimension_ids':['outcome']},
+                 {'purpose':'identity_recovery','query':'I1','dimension_ids':['population']},
+                 {'purpose':'contradiction','query':'C2','dimension_ids':['horizon']}]
+        selected=research_operations._round_robin_targets(targets,4)
+        self.assertEqual([row['query'] for row in selected],['S1','C1','I1','S2'])
+        self.assertEqual(selected[1],targets[2])
+        self.assertEqual(selected[2],targets[3])
+
+    def test_adaptive_budget_manifest_and_receipt_explain_policy_and_local_page_consumption(self):
+        planner=self._planner_result()
+        planner['matrix']={key:('x' if index < 1 else '') for index,key in enumerate(research_agents.DIMENSIONS)}
+        planner['competing_hypotheses']=[]
+        plan=research_operations._adaptive_budget_plan(planner,'documents_plus_search')
+        ledger=research_operations.BudgetLedger(0,clock=lambda:0)
+        ledger.configure(plan)
+        ledger.begin_round(research_operations.ROUNDS[0])
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            operation=store.create('case','claim','Synthetic claim',evidence_mode='documents_plus_search',
+                                   document_ids=['authorized-doc'])
+            engine=research_operations.ResearchOrchestrator(store,FakeProvider())
+            manifest=engine._manifest(operation,'retriever',research_operations.ROUNDS[0],ledger)
+            self.assertEqual(manifest['budget_policy'],research_operations.ADAPTIVE_BUDGET_POLICY)
+            self.assertEqual(manifest['budget_plan']['operation_query_cap'],10)
+            self.assertEqual(manifest['round_grant'],{'queries':4,'pages':6,'targets':4})
+        before=ledger.remaining()['global_queries']
+        first=ledger.observe({'type':'page','document_sha256':'doc-sha','page':7,'body_sha256':'passage-a'})
+        self.assertFalse(first['reused'])
+        self.assertEqual(ledger.remaining()['global_pages'],15)
+        self.assertEqual(ledger.remaining()['global_queries'],before)
+        duplicate=ledger.observe({'type':'page','document_sha256':'doc-sha','physical_page':7,
+                                  'body_sha256':'passage-b'})
+        self.assertTrue(duplicate['reused'])
+        self.assertEqual(ledger.page_count,1)
+
+    def test_adaptive_budget_plan_is_canonical_idempotent_and_bound_to_valid_planner(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            operation=store.create('case','claim','Synthetic claim')
+            engine=research_operations.ResearchOrchestrator(store,FakeProvider())
+            planner=self._planner_result()
+            planner['matrix']={key:('x' if index < 3 else '') for index,key in enumerate(research_agents.DIMENSIONS)}
+            first=engine._persist_budget_plan(operation,planner)
+            second=engine._persist_budget_plan(operation,planner)
+            self.assertEqual(first,second)
+            folder=store.folder(operation['operation_id'])/'artifacts'/'budget-plan'
+            files=list(folder.glob('*.json'))
+            self.assertEqual(len(files),1)
+            saved=json.loads(files[0].read_text(encoding='utf-8'))
+            self.assertTrue(saved['canonical'])
+            self.assertEqual(saved['value'],first)
+            changed=dict(planner)
+            changed['matrix']={**planner['matrix'],'horizon':'new declared dimension'}
+            with self.assertRaisesRegex(research_agents.AgentOutputError,'no coincide con la entrada validada'):
+                engine._persist_budget_plan(operation,changed)
+            self.assertEqual(len(list(folder.glob('*.json'))),1)
+
+    def test_planner_coverage_retry_preserves_raw_and_writes_one_checkpoint_for_each_evidence_mode(self):
+        valid=self._planner_result()
+        invalid=self._planner_result(missing_contradictions={'population'})
+        for mode,document_ids in (
+                ('question_search',[]),('documents_only',['doc-authorized']),
+                ('documents_plus_search',['doc-authorized'])):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                store=research_operations.OperationStore(Path(temp)/'ops')
+                operation=store.create('case','claim','Synthetic claim',evidence_mode=mode,
+                                       document_ids=document_ids)
+                calls=[]
+                class PlannerRetryProvider:
+                    def __call__(self,call):
+                        calls.append(call)
+                        result=invalid if len(calls)==1 else valid
+                        return {**result,"usage_events":[{"type":"query","query":"one synthetic planner receipt"}]}
+
+                engine=research_operations.ResearchOrchestrator(store,PlannerRetryProvider())
+                budget=research_operations.BudgetLedger(0,clock=lambda:0)
+                budget.begin_round(research_operations.ROUNDS[0])
+                result=engine._call(operation,'planner',{'claim':'Synthetic claim',
+                    'evidence_mode':mode,'document_ids':document_ids},budget,None)
+
+                self.assertEqual(len(calls),2)
+                self.assertEqual(result['matrix'],valid['matrix'])
+                retry=calls[1].payload['planner_retry']
+                self.assertEqual(retry['missing_contradiction_dimensions'],['population'])
+                self.assertEqual(retry['previous_invalid_output'],invalid)
+                self.assertIn('purpose=contradiction',retry['correction'])
+                self.assertIn('No conviertas ausencia de evidencia en contradicción.',retry['correction'])
+                self.assertEqual(calls[1].manifest['semantic_retry']['attempt'],2)
+                self.assertEqual(calls[1].manifest['semantic_retry']['missing_dimensions'],['population'])
+
+                artifacts=store.folder(operation['operation_id'])/'artifacts'
+                raw_files=sorted((artifacts/'raw-agent-output').glob('*.json'))
+                self.assertEqual(len(raw_files),2)
+                first=json.loads(raw_files[0].read_text(encoding='utf-8'))
+                second=json.loads(raw_files[1].read_text(encoding='utf-8'))
+                self.assertFalse(first['canonical'])
+                self.assertEqual(first['value']['result'],{**invalid,"usage_events":[
+                    {"type":"query","query":"one synthetic planner receipt"}]})
+                self.assertFalse(second['canonical'])
+                self.assertEqual(second['value']['result'],{**valid,"usage_events":[
+                    {"type":"query","query":"one synthetic planner receipt"}]})
+                self.assertEqual(len(budget.queries),1)
+                self.assertEqual(budget.page_count,0)
+                checkpoints=list((artifacts/'agent-results').glob('*.json'))
+                self.assertEqual(len(checkpoints),1)
+                checkpoint=json.loads(checkpoints[0].read_text(encoding='utf-8'))
+                self.assertTrue(checkpoint['canonical'])
+                self.assertEqual(checkpoint['value']['result']['matrix'],valid['matrix'])
+                self.assertEqual(len(checkpoint['value']['usage_events']),1)
+                self.assertEqual(list((artifacts/'retry-usage-replay').glob('*.json')),[])
+
+                reused=engine._call(operation,'planner',{'claim':'Synthetic claim',
+                    'evidence_mode':mode,'document_ids':document_ids},budget,None)
+                self.assertEqual(reused['matrix'],valid['matrix'])
+                self.assertEqual(len(calls),2)
+                self.assertEqual(len(list((artifacts/'agent-results').glob('*.json'))),1)
+                self.assertEqual(len(list((artifacts/'checkpoint-reuse').glob('*.json'))),1)
+                self.assertEqual(len(budget.queries),1)
+
+    def test_planner_retry_stops_after_second_invalid_coverage_result_without_checkpoint(self):
+        invalid=self._planner_result(missing_contradictions={'population'})
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            operation=store.create('case','claim','Synthetic claim')
+            calls=[]
+            class AlwaysInvalidProvider:
+                def __call__(self,call):
+                    calls.append(call)
+                    return invalid
+            engine=research_operations.ResearchOrchestrator(store,AlwaysInvalidProvider())
+            with self.assertRaises(research_agents.PlannerContradictionCoverageError) as raised:
+                engine._call(operation,'planner',{'claim':'Synthetic claim'},
+                             research_operations.BudgetLedger(0,clock=lambda:0),None)
+            self.assertEqual(raised.exception.missing_dimensions,('population',))
+            self.assertEqual(len(calls),2)
+            artifacts=store.folder(operation['operation_id'])/'artifacts'
+            self.assertEqual(len(list((artifacts/'raw-agent-output').glob('*.json'))),2)
+            self.assertEqual(list((artifacts/'agent-results').glob('*.json')),[])
+            self.assertEqual(list((artifacts/'budget-plan').glob('*.json')),[])
+
+    def test_pipeline_provider_promotes_bounded_planner_correction_to_instructions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            skill=root/'skills/research-planner/SKILL.md'
+            skill.parent.mkdir(parents=True)
+            skill.write_text('planner skill',encoding='utf-8')
+            observed={}
+            class FakeRunner:
+                run_id='planner-retry-fixture'
+                def call(self,stage,instructions,data,agent,budget):
+                    observed.update(stage=stage,instructions=instructions,data=data,agent=agent,budget=budget)
+                    return [{'matrix':{}}]
+            call=research_agents.AgentCall('planner',{'planner_retry':{
+                'missing_contradiction_dimensions':['population'],
+                'previous_invalid_output':{'matrix':{'population':'adults'}}}},
+                {'claim_ids':['claim'],'semantic_retry':{'reason':'missing_contradiction_dimension_coverage',
+                 'missing_dimensions':['population']},'budget_remaining':{'seconds':30,
+                 'round_queries':0,'round_pages':0}})
+            with patch.object(pipeline,'Runner',FakeRunner):
+                result=research_operations.PipelineProvider(root)(call)
+            self.assertEqual(result['matrix'],{})
+            self.assertIn('population',observed['instructions'])
+            self.assertIn('purpose=contradiction',observed['instructions'])
+            self.assertIn('No conviertas ausencia de evidencia en contradicción.',observed['instructions'])
+            self.assertEqual(observed['budget']['allowed_tools'],[])
+            self.assertEqual(observed['budget']['max_tool_actions'],0)
+
+    def test_invalid_planner_structure_is_not_given_semantic_coverage_retry(self):
+        invalid=self._planner_result(missing_contradictions={'population'})
+        invalid.pop('gaps')
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            operation=store.create('case','claim','Synthetic claim')
+            calls=[]
+            class InvalidStructureProvider:
+                def __call__(self,call):
+                    calls.append(call)
+                    return invalid
+            engine=research_operations.ResearchOrchestrator(store,InvalidStructureProvider())
+            with self.assertRaisesRegex(research_agents.AgentOutputError,'planner.gaps'):
+                engine._call(operation,'planner',{'claim':'Synthetic claim'},
+                             research_operations.BudgetLedger(0,clock=lambda:0),None)
+            self.assertEqual(len(calls),1)
+            artifacts=store.folder(operation['operation_id'])/'artifacts'
+            self.assertEqual(len(list((artifacts/'raw-agent-output').glob('*.json'))),1)
+            self.assertEqual(list((artifacts/'agent-results').glob('*.json')),[])
+
     def test_retriever_provider_keeps_tools_narrow_and_supplies_authorized_document_payload(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)
@@ -277,6 +585,17 @@ class AutomaticResearchTests(unittest.TestCase):
             self.assertTrue(rows)
             self.assertTrue(all('dimensions' in row for row in rows))
             self.assertTrue(all('evaluations' not in row for row in rows))
+            budget_plan=json.loads(next((artifacts/'budget-plan').glob('*.json')).read_text(encoding='utf-8'))
+            self.assertTrue(budget_plan['canonical'])
+            self.assertEqual(budget_plan['value']['evidence_mode'],'documents_only')
+            self.assertEqual(budget_plan['value']['operation_query_cap'],0)
+            self.assertGreater(budget_plan['value']['target_cap'],0)
+            receipts=[json.loads(path.read_text(encoding='utf-8'))['value']
+                      for path in (artifacts/'budget-receipts').glob('*.json')]
+            self.assertEqual(len(receipts),3)
+            self.assertTrue(all(receipt['queries_total']==0 for receipt in receipts))
+            self.assertTrue(all('round_grant' in receipt and 'shared_pool_remaining' in receipt
+                                for receipt in receipts))
 
     def test_operation_modes_are_validated_and_fingerprinted(self):
         with tempfile.TemporaryDirectory() as temp:

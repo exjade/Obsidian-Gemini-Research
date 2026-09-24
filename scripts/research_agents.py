@@ -34,6 +34,18 @@ class AgentOutputError(ValueError):
     """The provider returned an incomplete or unsafe agent result."""
 
 
+class PlannerContradictionCoverageError(AgentOutputError):
+    """The planner omitted explicit contradiction targets for declared dimensions."""
+
+    def __init__(self, missing_dimensions: Iterable[str]):
+        self.missing_dimensions = tuple(missing_dimensions)
+        detail = ", ".join(self.missing_dimensions)
+        super().__init__(
+            "Cada dimensión declarada debe tener una búsqueda explícita de contradicción. "
+            f"Dimensiones sin cobertura: {detail}."
+        )
+
+
 def stable_digest(value: Any) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -81,11 +93,12 @@ def validate_agent_output(role: str, value: Any) -> dict[str, Any]:
             _text(row.get("query"), f"planner.retrieval_targets[{index}].query")
             if row.get("purpose") not in {"support", "contradiction", "identity_recovery"}:
                 raise AgentOutputError("planner.retrieval_targets.purpose es inválido.")
-        critical={key for key,value in matrix.items() if value}
+        critical={key for key in DIMENSIONS if matrix.get(key)}
         contradictory={dimension for row in data['retrieval_targets'] if row.get('purpose')=='contradiction'
                        for dimension in row.get('dimension_ids',[])}
-        if critical and not critical.issubset(contradictory):
-            raise AgentOutputError("Cada dimensión declarada debe tener una búsqueda explícita de contradicción.")
+        missing = [key for key in DIMENSIONS if key in critical and key not in contradictory]
+        if missing:
+            raise PlannerContradictionCoverageError(missing)
     elif role == "formulation_reviewer":
         if not isinstance(data.get("compound"), bool):
             raise AgentOutputError("formulation_reviewer.compound debe ser booleano.")
