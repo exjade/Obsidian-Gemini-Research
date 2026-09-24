@@ -345,6 +345,53 @@ function collect(node){return [node.textContent||'',...node.children.flatMap(col
         text=self.evaluate("executionError({log:'ERROR: pass3: Antigravity superó 900 segundos; salida parcial conservada.'})")
         self.assertIn('una recopilación completa todavía válida',text)
         self.assertIn('Se agotó el tiempo',text)
+        self.assertIn('Mensaje registrado: pass3:',text)
+
+    def test_execution_error_prefers_structured_operation_message_and_identifies_scope(self):
+        job={'status':'error','operation_id':'op-1','stage':'general stage','log':'',
+             'operation':{'operation_id':'op-1','kind':'claim_research','claim_id':'claim-1',
+                          'stage':'retriever','error':{'type':'AgentOutputError','message':'Fuente inválida'}}}
+        detail=self.evaluate('executionDetail('+json.dumps(job,ensure_ascii=False)+')')
+        summary=self.evaluate('executionSummary('+json.dumps(job,ensure_ascii=False)+')')
+        link=self.evaluate('executionOperationLink('+json.dumps(job,ensure_ascii=False)+')')
+        self.assertIn('Fuente inválida',detail)
+        self.assertIn('AgentOutputError',detail)
+        self.assertIn('op-1',detail)
+        self.assertIn('retriever',detail)
+        self.assertIn('estado global',detail)
+        self.assertIn('Operación op-1',summary)
+        self.assertIn('Etapa retriever',summary)
+        self.assertEqual(link,{'view':'claims','claim_id':'claim-1'})
+
+    def test_execution_error_without_registered_message_is_explicit_and_nonempty(self):
+        job={'status':'error','operation_id':'op-empty','log':'',
+             'operation':{'operation_id':'op-empty','kind':'claim_research','stage':'auditor',
+                          'error':{'type':'ProviderError'}}}
+        error=self.evaluate('executionError('+json.dumps(job)+')')
+        detail=self.evaluate('executionDetail('+json.dumps(job)+')')
+        self.assertIn('El error no fue registrado',error)
+        self.assertTrue(detail.strip())
+        self.assertIn('op-empty',detail)
+        self.assertIn('auditor',detail)
+        self.assertIn('ProviderError',detail)
+        self.assertIn('detalle de la operación',error)
+
+    def test_execution_error_reads_legacy_prefixed_and_unprefixed_logs(self):
+        prefixed=self.evaluate("executionError({status:'error',log:'inicio\\nERROR: provider failed'})")
+        plain=self.evaluate("executionError({status:'error',log:'provider failed without prefix'})")
+        self.assertEqual(prefixed,'provider failed')
+        self.assertEqual(plain,'provider failed without prefix')
+
+    def test_execution_global_detail_survives_refresh_projection_and_keeps_scoped_error_separate(self):
+        job={'status':'error','operation_id':'op-refresh','stage':'fallback','log':'',
+             'operation':{'operation_id':'op-refresh','kind':'claim_research','claim_id':'claim-x',
+                          'stage':'review','error':{'type':'ValueError','message':'persisted failure'}}}
+        texts=self.evaluate('(()=>{const job='+json.dumps(job)+';return [executionLogText(job),executionLogText(job)]})()')
+        self.assertEqual(texts[0],texts[1])
+        self.assertIn('persisted failure',texts[0])
+        self.assertIn('Este detalle resume el estado global',texts[0])
+        self.assertIn('error canónico',self.evaluate('executionSummary('+json.dumps(job)+')'))
+        self.assertIsNone(self.evaluate("executionOperationLink({status:'error',operation_id:'op-tech',operation:{kind:'technical_check',operation_id:'op-tech'}})"))
 
 
     def test_activity_records_scope_human_and_provider_without_inventing_events(self):

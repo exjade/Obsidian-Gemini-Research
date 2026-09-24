@@ -968,6 +968,111 @@ class AutomaticResearchTests(unittest.TestCase):
                 self.assertEqual(failed['updated_at'],finished_at)
             finally:frontend.INTEL=old
 
+    def test_job_snapshot_projects_persisted_operation_error_without_mutating_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation_id='a'*32
+                persisted={'id':operation_id,'operation_id':operation_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'error','stage':'retriever',
+                    'error':{'type':'AgentOutputError','message':'identity missing'},'result':None}
+                frontend.operation_write(persisted)
+                job={'status':'error','case_id':'case','operation_id':operation_id,'stage':'global stage','log':''}
+                first=frontend.job_snapshot(job);second=frontend.job_snapshot(job)
+                self.assertEqual(job,{'status':'error','case_id':'case','operation_id':operation_id,'stage':'global stage','log':''})
+                self.assertEqual(first,second)
+                self.assertEqual(first['operation']['operation_id'],operation_id)
+                self.assertEqual(first['operation']['kind'],'claim_research')
+                self.assertEqual(first['operation']['case_id'],'case')
+                self.assertEqual(first['operation']['claim_id'],'claim')
+                self.assertEqual(first['operation']['stage'],'retriever')
+                self.assertEqual(first['operation']['error'],{'type':'AgentOutputError','message':'identity missing'})
+                self.assertEqual(frontend.operation_read(operation_id)['error'],persisted['error'])
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_job_snapshot_keeps_legacy_string_error_and_unknown_stage_as_recorded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation_id='b'*32
+                frontend.operation_write({'id':operation_id,'operation_id':operation_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'failed','error':'legacy failure'})
+                result=frontend.job_snapshot({'status':'error','operation_id':operation_id,'log':''})
+                self.assertEqual(result['operation']['error'],'legacy failure')
+                self.assertNotIn('stage',result['operation'])
+                missing=frontend.job_snapshot({'status':'error','operation_id':'c'*32,'log':''})
+                self.assertEqual(missing['operation_id'],'c'*32)
+                self.assertNotIn('operation',missing)
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_job_snapshot_points_at_failed_attempt_without_hiding_completed_operation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                completed_id='d'*32;failed_id='e'*32
+                frontend.operation_write({'id':completed_id,'operation_id':completed_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'done','stage':'complete',
+                    'result':{'resolution':'indeterminate'},'error':None,'requested_at':'2026-09-22T10:00:00Z'})
+                frontend.operation_write({'id':failed_id,'operation_id':failed_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'failed','stage':'review',
+                    'result':None,'error':{'type':'ValueError','message':'later attempt failed'},
+                    'requested_at':'2026-09-23T10:00:00Z'})
+                snapshot=frontend.job_snapshot({'status':'error','case_id':'case','operation_id':failed_id,'log':''})
+                history=frontend.operations_for('case','claim')
+                self.assertEqual(snapshot['operation']['operation_id'],failed_id)
+                self.assertEqual(snapshot['operation']['error']['message'],'later attempt failed')
+                self.assertEqual({row['operation_id'] for row in history},{completed_id,failed_id})
+                self.assertEqual(frontend.operation_read(completed_id)['result'],{'resolution':'indeterminate'})
+                self.assertEqual(frontend.operation_read(failed_id)['status'],'failed')
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_automatic_claim_research_exception_preserves_recorded_failure_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT;old_job=dict(frontend.JOB)
+            try:
+                frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation,_=frontend.operation_start('claim_research','case','claim')
+                frontend.JOB.clear();frontend.JOB.update(status='running',case_id='case',operation_id=operation['id'],log='')
+                def fail(update):
+                    update(stage='skeptic')
+                    raise RuntimeError('provider wrapper failed')
+                with patch.object(frontend.importlib,'import_module',return_value=type('Module',(),{'run_claim_research':staticmethod(fail)})):
+                    frontend.automatic_claim_research('case','claim',operation['id'])
+                saved=frontend.operation_read(operation['id'])
+                snapshot=frontend.job_snapshot(dict(frontend.JOB))
+                self.assertEqual(saved['status'],'error')
+                self.assertEqual(saved['stage'],'skeptic')
+                self.assertEqual(saved['error'],'provider wrapper failed')
+                self.assertEqual(frontend.JOB['status'],'error')
+                self.assertEqual(snapshot['operation']['stage'],'skeptic')
+            finally:
+                frontend.INTEL,frontend.ROOT=old_intel,old_root;frontend.JOB.clear();frontend.JOB.update(old_job)
+
+    def test_automatic_claim_research_failed_engine_preserves_recorded_failure_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT;old_job=dict(frontend.JOB)
+            try:
+                frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation,_=frontend.operation_start('claim_research','case','claim')
+                frontend.JOB.clear();frontend.JOB.update(status='running',case_id='case',operation_id=operation['id'],log='')
+                def fail(update):
+                    update(stage='auditor',status='failed',error={'type':'AuditError','message':'audit rejected'})
+                    return None
+                with patch.object(frontend.importlib,'import_module',return_value=type('Module',(),{'run_claim_research':staticmethod(fail)})):
+                    frontend.automatic_claim_research('case','claim',operation['id'])
+                saved=frontend.operation_read(operation['id'])
+                snapshot=frontend.job_snapshot(dict(frontend.JOB))
+                self.assertEqual(saved['status'],'error')
+                self.assertEqual(saved['stage'],'auditor')
+                self.assertEqual(saved['error'],{'type':'AuditError','message':'audit rejected'})
+                self.assertEqual(frontend.JOB['status'],'error')
+                self.assertEqual(snapshot['operation']['stage'],'auditor')
+            finally:
+                frontend.INTEL,frontend.ROOT=old_intel,old_root;frontend.JOB.clear();frontend.JOB.update(old_job)
+
     def test_operation_read_does_not_fill_missing_legacy_timestamp_fields(self):
         with tempfile.TemporaryDirectory() as temp:
             old_intel,old_root=frontend.INTEL,frontend.ROOT
@@ -1301,6 +1406,9 @@ class AutomaticResearchTests(unittest.TestCase):
                 technical_after=frontend.operation_read(technical['id'])
                 self.assertEqual((failed_after['kind'],failed_after['status']),('claim_research','failed'))
                 self.assertEqual(failed_after['error'],{'type':'AgentOutputError','message':'kept failure'})
+                failed_global=frontend.job_snapshot({'status':'error','case_id':'case',
+                    'operation_id':failed['id'],'log':''})
+                self.assertEqual(failed_global['operation']['error']['message'],'kept failure')
                 self.assertEqual((technical_after['kind'],technical_after['status']),('technical_check','done'))
                 self.assertFalse(technical_after['result']['verdict_changed'])
                 self.assertEqual({row['kind'] for row in frontend.operations_for('case','claim-a')},{'claim_research','technical_check'})

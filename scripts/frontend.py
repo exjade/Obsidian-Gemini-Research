@@ -130,6 +130,24 @@ def operation_read(operation_id):
     return merged
 
 
+def job_snapshot(job=None):
+    """Build a read-only JOB view with a compact reference to its persisted operation."""
+    snapshot=dict(JOB if job is None else job)
+    operation_id=snapshot.get('operation_id')
+    if not operation_id:
+        return snapshot
+    try:
+        record=operation_read(operation_id)
+    except (ValueError,OSError,TypeError):
+        # Keep the identifier already present in JOB. A missing/unreadable
+        # operation must not be replaced with a fabricated error message.
+        return snapshot
+    snapshot['operation']={key:record.get(key) for key in (
+        'operation_id','kind','case_id','claim_id','status','stage','error',
+        'frontend_error','engine_error') if key in record}
+    return snapshot
+
+
 def operation_write(record):
     directory=operation_directory();directory.mkdir(parents=True,exist_ok=True)
     target=operation_path(record['id']);temp=target.with_name(target.name+'.'+uuid.uuid4().hex+'.tmp')
@@ -449,9 +467,10 @@ def automatic_claim_research(case_id,claim_id,operation_id):
             payload=result.get('result') if isinstance(result,dict) and 'operation_id' in result else result
             operation_update(operation_id,status='done',stage='Investigación automática terminada',result=payload or current.get('result') or {})
         elif current.get('status')=='failed':
-            operation_update(operation_id,status='error',stage='La investigación automática necesita atención',error=current.get('error'))
+            operation_update(operation_id,status='error',stage=current.get('stage') or 'La investigación automática necesita atención',error=current.get('error'))
     except Exception as exc:
-        operation_update(operation_id,status='error',stage='La investigación automática necesita atención',error=str(exc))
+        current=operation_read(operation_id) or {}
+        operation_update(operation_id,status='error',stage=current.get('stage') or 'La investigación automática necesita atención',error=str(exc))
     finally:
         with LOCK:
             if JOB.get('operation_id')==operation_id:
@@ -699,7 +718,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond({'meta':meta,'closure':closure,'claims':claims,'activity_timeline':activity_timeline, 'human_reviews':human_review.history(cid), 'human_review_available':True,'delete_available':True,'scope_available':True,'pdf_identity_review_available':True,'local_documents':local_documents,'revisions':revision_rows,'uri':library.uri(cid),'related':related,'notes':(notes if notes.exists() else folder/'notas.md').read_text(encoding='utf-8-sig'),'documents':{key:(folder/name).read_text(encoding='utf-8') if (folder/name).exists() else 'Pendiente de esta pasada.' for key,name in [('research','resultados.md'),('sources','fuentes.md'),('audit','auditoria.md'),('architecture','resumen.md'),('question','pregunta.md')]}})
             except (ValueError,OSError,KeyError) as exc:return self.respond({'error':str(exc)},404)
         if self.path == '/api/status':
-            with LOCK: job = dict(JOB)
+            with LOCK: job = job_snapshot(JOB)
             claims = []
             for group in ('architecture','dependencies','changes'):
                 claims.extend(read_json(INTEL/'claims'/(group+'.json'), []))
