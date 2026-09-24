@@ -990,6 +990,12 @@ class AutomaticResearchTests(unittest.TestCase):
                 self.assertEqual(failed['updated_at'],finished_at)
             finally:frontend.INTEL=old
 
+    def test_global_execution_busy_uses_job_and_real_pipeline_lock_signals(self):
+        self.assertTrue(frontend.global_execution_busy({'status':'running'},lock_exists=False))
+        self.assertTrue(frontend.global_execution_busy({'status':'idle'},lock_exists=True))
+        for status in ('idle','done','error'):
+            self.assertFalse(frontend.global_execution_busy({'status':status},lock_exists=False),status)
+
     def test_job_snapshot_projects_persisted_operation_error_without_mutating_history(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);old_intel,old_root=frontend.INTEL,frontend.ROOT

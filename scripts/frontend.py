@@ -171,6 +171,13 @@ def job_snapshot(job=None):
     return snapshot
 
 
+def global_execution_busy(job=None, lock_exists=None):
+    """Return the same global busy signals that protect write actions."""
+    current=JOB if job is None else job
+    locked=(INTEL/'pipeline.lock').exists() if lock_exists is None else bool(lock_exists)
+    return current.get('status')=='running' or locked
+
+
 def operation_write(record):
     directory=operation_directory();directory.mkdir(parents=True,exist_ok=True)
     target=operation_path(record['id']);temp=target.with_name(target.name+'.'+uuid.uuid4().hex+'.tmp')
@@ -741,12 +748,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond({'meta':meta,'closure':closure,'claims':claims,'activity_timeline':activity_timeline, 'human_reviews':human_review.history(cid), 'human_review_available':True,'delete_available':True,'scope_available':True,'pdf_identity_review_available':True,'local_documents':local_documents,'revisions':revision_rows,'uri':library.uri(cid),'related':related,'notes':(notes if notes.exists() else folder/'notas.md').read_text(encoding='utf-8-sig'),'documents':{key:(folder/name).read_text(encoding='utf-8') if (folder/name).exists() else 'Pendiente de esta pasada.' for key,name in [('research','resultados.md'),('sources','fuentes.md'),('audit','auditoria.md'),('architecture','resumen.md'),('question','pregunta.md')]}})
             except (ValueError,OSError,KeyError) as exc:return self.respond({'error':str(exc)},404)
         if self.path == '/api/status':
-            with LOCK: job = job_snapshot(JOB)
+            with LOCK:
+                job = job_snapshot(JOB)
+                global_busy = global_execution_busy(JOB)
             claims = []
             for group in ('architecture','dependencies','changes'):
                 claims.extend(read_json(INTEL/'claims'/(group+'.json'), []))
             return self.respond({'api_schema':API_SCHEMA,'build_id':BUILD_ID,'pid':os.getpid(),
-                                 'port':self.server.server_port,'job': job, 'state': read_json(INTEL/'state.json', {}), 'claims': claims,
+                                 'port':self.server.server_port,'job': job, 'global_busy':global_busy,
+                                 'state': read_json(INTEL/'state.json', {}), 'claims': claims,
                                  'vault_path': read_json(INTEL/'obsidian.json', {}).get('vault_path'),
                                  'documents': {k: p.read_text(encoding='utf-8') if p.exists() else '' for k,p in DOCUMENTS.items()}})
         return self.respond({'error':'No encontrado'},404)

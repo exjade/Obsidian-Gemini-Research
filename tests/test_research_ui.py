@@ -23,7 +23,7 @@ class ResearchUITests(unittest.TestCase):
         source=(Path(__file__).resolve().parents[1]/'scripts/frontend.html').read_text(encoding='utf-8')
         model=source.split('// BEGIN RESEARCH MODEL:')[1].split('// END RESEARCH MODEL')[0]
         model=model[model.index('\n'):]
-        render=source[source.index('function text(parent,value,tag='):source.index('function renderClaimTimeline(')]
+        render=source[source.index('function text(parent,value,tag='):source.index('function renderTechnicalCheckHistory(')]
         globals="""
 function localDate(value){return value?new Date(value).toLocaleString('es-ES'):'Fecha no registrada'}
 function timelineDate(value){return value?localDate(value):'Fecha no registrada'}
@@ -42,7 +42,7 @@ function collect(node){return [node.textContent||'',...node.children.flatMap(col
         source=(Path(__file__).resolve().parents[1]/'scripts/frontend.html').read_text(encoding='utf-8')
         model=source.split('// BEGIN RESEARCH MODEL:')[1].split('// END RESEARCH MODEL')[0]
         model=model[model.index('\n'):]
-        render=source[source.index('function text(parent,value,tag='):source.index('function renderClaimTimeline(')]
+        render=source[source.index('function text(parent,value,tag='):source.index('function renderScientificResolutionHistory(')]
         globals="""
 function localDate(value){return value?new Date(value).toLocaleString('es-ES'):'Fecha no registrada'}
 function timelineDate(value){return value?localDate(value):'Fecha no registrada'}
@@ -61,13 +61,13 @@ function collect(node){return [node.textContent||'',...node.children.flatMap(col
         verdict_start=source.index('function renderVerdictHistory(')
         verdict_end=source.index('\n\nfunction humanReviewForm(',verdict_start)
         render+=source[verdict_start:verdict_end]
-        globals="""
+        globals="""\
 function timelineDate(value){return value?new Date(value).toLocaleString('es-ES'):'Fecha no registrada'}
 const verdictNames={VERIFIED:'Verificada',UNSUPPORTED:'Sin respaldo suficiente',UNVERIFIED:'Pendiente'};
-const document={createElement(tag){return {tag,children:[],attrs:{},append(...items){this.children.push(...items)},setAttribute(key,value){this.attrs[key]=value}}}}
-function collect(node){return [node.textContent||'',...node.children.flatMap(collect)]}
+const document={createElement(tag){return {tag,children:[],attrs:{},open:false,append(...items){this.children.push(...items)},setAttribute(key,value){this.attrs[key]=value}}}}
+function collect(node,expanded=false){const own=node.textContent?[node.textContent]:[];if(node.tag==='details'&&!expanded){const summary=node.children.find(child=>child.tag==='summary');return [...own,...(summary?collect(summary,expanded):[])]}return [...own,...node.children.flatMap(child=>collect(child,expanded))]}
 """
-        expression="const resolution=document.createElement('section');renderScientificResolutionHistory(resolution,"+json.dumps(claim,ensure_ascii=False)+");const verdict=document.createElement('section');renderVerdictHistory(verdict,"+json.dumps(claim,ensure_ascii=False)+");console.log(JSON.stringify({resolution:collect(resolution),verdict:collect(verdict)}))"
+        expression="const resolution=document.createElement('section');renderScientificResolutionHistory(resolution,"+json.dumps(claim,ensure_ascii=False)+");const verdict=document.createElement('section');renderVerdictHistory(verdict,"+json.dumps(claim,ensure_ascii=False)+");console.log(JSON.stringify({resolution:collect(resolution),expanded:collect(resolution,true),verdict:collect(verdict)}))"
         result=subprocess.run(['node','-e',globals+render+'\n'+expression],capture_output=True,encoding='utf-8')
         self.assertEqual(result.returncode,0,result.stderr)
         return json.loads(result.stdout)
@@ -104,11 +104,65 @@ function collect(node){return [node.textContent||'',...node.children.flatMap(col
         self.assertFalse(completed['disabled']);self.assertTrue(completed['newRun']);self.assertEqual(completed['label'],'Investigar de nuevo')
 
     def test_research_action_disables_only_while_incompatible_work_is_running(self):
-        running={"kind":"claim_research","operation_id":"active","status":"running"}
-        active=self.evaluate("claimResearchActionState("+json.dumps({"operations":[running],"latest_operation":running,"current_completed":None,"has_active":True})+",false)")
-        self.assertTrue(active['disabled']);self.assertEqual(active['label'],'Investigación en curso')
+        for status in ('queued','running'):
+            operation={"kind":"claim_research","operation_id":"active","status":status}
+            active=self.evaluate("claimResearchActionState("+json.dumps({"operations":[operation],"latest_operation":operation,"current_completed":None,"has_active":True})+",false)")
+            self.assertTrue(active['disabled'],status)
+            self.assertTrue(active['claimActive'],status)
+            self.assertEqual(active['label'],'Investigación en curso')
+            self.assertEqual(active['disabledReason'],'Investigación en curso para esta afirmación.')
+            self.assertFalse(active['globalBusy'])
         globally_busy=self.evaluate("claimResearchActionState({operations:[],latest_operation:null,current_completed:null,has_active:false},true)")
         self.assertTrue(globally_busy['disabled'])
+
+    def test_research_action_state_explains_scoped_global_and_service_blocks(self):
+        empty={"operations":[],"latest_operation":None,"current_completed":None,"has_active":False}
+        running={"kind":"claim_research","operation_id":"active","status":"running"}
+        claim_active=self.evaluate("claimResearchViewModel("+json.dumps({"operations":[running],"latest_operation":running,"current_completed":None,"has_active":True})+",{globalBusy:false,serviceCompatible:true})")
+        self.assertTrue(claim_active['claimActive'])
+        self.assertFalse(claim_active['globalBusy'])
+        self.assertEqual(claim_active['disabledReason'],'Investigación en curso para esta afirmación.')
+        self.assertEqual(claim_active['label'],'Investigación en curso')
+        global_busy=self.evaluate("claimResearchViewModel("+json.dumps(empty)+",{globalBusy:true,serviceCompatible:true})")
+        self.assertFalse(global_busy['claimActive'])
+        self.assertTrue(global_busy['globalBusy'])
+        self.assertTrue(global_busy['disabled'])
+        self.assertIn('otra ejecución',global_busy['label'])
+        self.assertIn('otra ejecución',global_busy['disabledReason'])
+        for status in ('idle','done','error'):
+            state=self.evaluate("claimResearchActionState("+json.dumps(empty)+",{globalBusy:false,serviceCompatible:true,jobStatus:"+json.dumps(status)+"})")
+            self.assertFalse(state['disabled'],status)
+            self.assertIsNone(state['disabledReason'])
+        stale_service=self.evaluate("claimResearchActionState("+json.dumps(empty)+",{globalBusy:false,serviceCompatible:false})")
+        self.assertTrue(stale_service['disabled'])
+        self.assertIn('Servicio desactualizado',stale_service['disabledReason'])
+
+    def test_refresh_preserves_scoped_reason_and_button_bindings_follow_disabled_state(self):
+        source=(Path(__file__).resolve().parents[1]/'scripts/frontend.html').read_text(encoding='utf-8')
+        refresh=source[source.index('async function refresh()'):source.index('function encodeFile(')]
+        render=source[source.index('function renderClaimPages('):source.index('function renderScientificResolution(')]
+        self.assertIn("if(b.dataset.claimResearchAction==='true')return",refresh)
+        self.assertIn("b.disabled=!serviceCompatible||snapshot.global_busy===true||j.status==='running'||b.getAttribute('data-operation-blocked')==='true'",refresh)
+        self.assertIn("snapshot.job,snapshot.global_busy,serviceCompatible",source)
+        self.assertIn("automatic.disabled=actionState.disabled",render)
+        self.assertIn("automatic.title=actionState.disabledReason",render)
+        self.assertIn("automatic.setAttribute('aria-describedby',reason.id)",render)
+        self.assertIn("if(!actionState.disabled)automatic.onclick=",render)
+        self.assertIn("researchClaim(c.id,mode,ids,actionState.newRun)",render)
+        pending=source[source.index('function markClaimResearchGloballyPending()'):source.index('async function run(mode)')]
+        run=source[source.index('async function run(mode)'):source.index('async function api(')]
+        self.assertIn('button.onclick=null',pending)
+        self.assertIn("button.after(help)",pending)
+        self.assertIn('markClaimResearchGloballyPending()',run)
+        self.assertGreaterEqual(run.count("renderKey='';await refresh()"),2)
+
+    def test_research_action_reenables_after_global_busy_finishes(self):
+        empty={"operations":[],"latest_operation":None,"current_completed":None,"has_active":False}
+        while_busy=self.evaluate("claimResearchActionState("+json.dumps(empty)+",{globalBusy:true,serviceCompatible:true})")
+        after_done=self.evaluate("claimResearchActionState("+json.dumps(empty)+",{globalBusy:false,serviceCompatible:true})")
+        self.assertTrue(while_busy['disabled'])
+        self.assertFalse(after_done['disabled'])
+        self.assertEqual(after_done['label'],'Buscar respaldo y reevaluar automáticamente')
 
     def test_old_operation_does_not_present_updated_at_as_finish_time(self):
         with_finish=self.evaluate("operationFinishLabel({finished_at:'2026-09-23T12:00:00Z',updated_at:'2026-09-23T12:01:00Z'})")
@@ -262,34 +316,121 @@ function collect(node){return [node.textContent||'',...node.children.flatMap(col
         self.assertIn("Aún no hay investigaciones registradas.",rendered)
         self.assertIn("Este historial no representa cambios del veredicto.",rendered)
 
-    def test_research_verdict_and_scientific_resolution_histories_render_as_distinct_sections(self):
+    def test_scientific_resolution_history_one_resolution_is_compact_and_keeps_verdict_separate(self):
         claim={"scientific_resolution_history":[
-            {"resolution_id":"res-supported","resolution":"supported","created_at":"2026-09-22T10:00:00Z","operation_id":"op-a","claim_version":2,"input_fingerprint":"fp-a","limitations":["Adult sample"],"dimensions":{"population":{"state":"supported"}}},
-            {"resolution_id":"res-indeterminate","resolution":"indeterminate","created_at":"2026-09-23T10:00:00Z","operation_id":"op-b","claim_version":3,"input_fingerprint":"fp-b","limitations":["No delayed measure"],"dimensions":{"horizon":{"state":"unresolved"}}},
-        ],"timeline":[
-            {"category":"scientific_resolution","source_record_id":"res-supported","operation_id":"op-a","occurred_at":"2026-09-22T10:00:00Z","details":{"resolution_id":"res-supported","resolution":"supported","claim_version":2,"input_fingerprint":"fp-a","limitations":["Adult sample"],"dimensions":{"population":{"state":"supported"}},"evidence_links":[{"source_id":"source-a","evidence_id":"passage-a"}]}},
-            {"category":"scientific_resolution","source_record_id":"res-indeterminate","operation_id":"op-b","occurred_at":"2026-09-23T10:00:00Z","details":{"resolution_id":"res-indeterminate","resolution":"indeterminate","claim_version":3,"input_fingerprint":"fp-b","limitations":["No delayed measure"],"dimensions":{"horizon":{"state":"unresolved"}},"evidence_ids":["passage-b"]}},
-        ],"provenance":[]}
+            {"resolution_id":"res-one","resolution":"supported","created_at":"2026-09-22T10:00:00Z",
+             "operation_id":"op-one","claim_version":2,"input_fingerprint":"fingerprint-secret",
+             "limitations":["Adult sample"],"dimensions":{"population":{"state":"supported"}},
+             "evidence_ids":["passage-secret"]}],"provenance":[]}
         rendered=self.render_scientific_and_verdict_history(claim)
-        resolution='\n'.join(rendered['resolution']);verdict='\n'.join(rendered['verdict'])
-        for expected in ['Historial de resolución científica','supported','indeterminate','op-a','op-b','2026','fp-a','fp-b','population: supported','horizon: unresolved','Adult sample','No delayed measure','source-a/passage-a','passage-b']:
-            self.assertIn(expected,resolution)
-        self.assertNotIn('Historial de evaluación',resolution)
-        self.assertIn('Historial de evaluación',verdict)
-        self.assertIn('Una investigación automática que no cambió el veredicto',verdict)
-        self.assertIn('No hay cambios de veredicto registrados.',verdict)
-        self.assertNotIn('supported',verdict)
-        self.assertNotIn('indeterminate',verdict)
+        summary='\n'.join(rendered['resolution']);detail='\n'.join(rendered['expanded']);verdict='\n'.join(rendered['verdict'])
+        for expected in ["Historial de resolución científica","SUPPORTED","Operación: op-one","Versión 2",
+                         "Dimensiones: 1 con apoyo · 0 contradichas · 0 sin resolver","1 pasaje vinculado","Limitación: Adult sample","Ver detalle"]:
+            self.assertIn(expected,summary)
+        self.assertNotIn("fingerprint-secret",summary)
+        self.assertNotIn("passage-secret",summary)
+        self.assertIn("fingerprint-secret",detail)
+        self.assertIn("passage-secret",detail)
+        self.assertIn("Historial de evaluación",verdict)
+        self.assertNotIn("Historial de evaluación",summary)
+        self.assertNotIn("Historial de resolución científica",verdict)
 
-    def test_legacy_resolution_without_id_or_date_remains_visible_without_invented_values(self):
+    def test_multiple_scientific_resolutions_sort_newest_first_and_preserve_all(self):
+        claim={"scientific_resolution_history":[
+            {"resolution_id":"older","resolution":"supported","created_at":"2026-09-22T10:00:00Z"},
+            {"resolution_id":"newer","resolution":"indeterminate","created_at":"2026-09-23T10:00:00Z"}],"provenance":[]}
+        rendered=self.render_scientific_and_verdict_history(claim)
+        summary='\n'.join(rendered['resolution'])
+        self.assertLess(summary.index("INDETERMINATE"),summary.index("SUPPORTED"))
+        self.assertIn("older",'\n'.join(rendered['expanded']))
+        self.assertIn("newer",'\n'.join(rendered['expanded']))
+
+    def test_legacy_resolution_uses_explicit_missing_origin_and_does_not_invent_metadata(self):
         rendered=self.render_scientific_and_verdict_history({"scientific_resolution_history":[
-            {"resolution":"unresolved","limitations":"Registro antiguo"}
-        ],"provenance":[]})
-        resolution='\n'.join(rendered['resolution'])
-        self.assertIn('unresolved',resolution)
-        self.assertIn('Fecha no registrada',resolution)
-        self.assertIn('Operación no registrada',resolution)
-        self.assertIn('Versión de afirmación no registrada',resolution)
+            {"resolution":"unresolved","limitations":"Registro antiguo"}],"provenance":[]})
+        summary='\n'.join(rendered['resolution']);detail='\n'.join(rendered['expanded'])
+        self.assertIn("Fecha no registrada",summary)
+        self.assertIn("Operación de origen: no registrada en este dato histórico",summary)
+        self.assertIn("Operación de origen: no registrada en este dato histórico",detail)
+        self.assertNotIn("Operación: Operación no registrada",summary)
+        self.assertNotIn("Versión",summary)
+        self.assertIn("Versión de afirmación no registrada",detail)
+
+    def test_resolution_with_operation_id_shows_it_in_summary_and_full_detail(self):
+        operation_id="operation-1234567890abcdef"
+        rendered=self.render_scientific_and_verdict_history({"scientific_resolution_history":[
+            {"resolution_id":"res-op","resolution":"contradicted","created_at":"2026-09-23T11:54:00Z",
+             "operation_id":operation_id,"claim_version":4}],"provenance":[]})
+        self.assertIn("Operación: "+operation_id,'\n'.join(rendered['resolution']))
+        self.assertIn("ID de operación completo: "+operation_id,'\n'.join(rendered['expanded']))
+
+    def test_many_linked_evidence_items_are_counted_and_ids_stay_in_collapsed_details(self):
+        links=[{"source_id":"source-1","evidence_id":"passage-"+str(i)+"-"+"x"*48} for i in range(17)]
+        claim={"scientific_resolution_history":[
+            {"resolution_id":"many","resolution":"unresolved","created_at":"2026-09-23T11:54:00Z",
+             "dimensions":{"population":{"state":"unresolved"}}}],
+             "timeline":[{"category":"scientific_resolution","source_record_id":"many","occurred_at":"2026-09-23T11:54:00Z",
+                          "details":{"resolution_id":"many","resolution":"unresolved","dimensions":{"population":{"state":"unresolved"}},
+                                     "evidence_links":links}}]}
+        rendered=self.render_scientific_and_verdict_history(claim)
+        summary='\n'.join(rendered['resolution']);expanded='\n'.join(rendered['expanded'])
+        self.assertIn("17 pasajes vinculados",summary)
+        self.assertNotIn("passage-0-",summary)
+        self.assertIn("passage-0-"+"x"*48,expanded)
+        self.assertIn("overflow-wrap:anywhere",Path(__file__).resolve().parents[1].joinpath('scripts/frontend.html').read_text(encoding='utf-8'))
+        self.assertIn("word-break:break-word",Path(__file__).resolve().parents[1].joinpath('scripts/frontend.html').read_text(encoding='utf-8'))
+
+    def test_resolution_without_evidence_shows_zero_without_fabricating_ids(self):
+        rendered=self.render_scientific_and_verdict_history({"scientific_resolution_history":[
+            {"resolution_id":"no-evidence","resolution":"indeterminate","created_at":"2026-09-23T11:54:00Z"}],"provenance":[]})
+        summary='\n'.join(rendered['resolution']);detail='\n'.join(rendered['expanded'])
+        self.assertIn("0 pasajes vinculados",summary)
+        self.assertIn("0 pasajes; no hay identificadores registrados",detail)
+        self.assertNotIn("evidence_id",detail)
+
+    def test_mixed_dimension_states_have_explicit_counts_and_full_labels(self):
+        rendered=self.render_scientific_and_verdict_history({"scientific_resolution_history":[
+            {"resolution_id":"mixed","resolution":"unresolved","dimensions":{
+                "a":{"state":"supported"},"b":{"state":"contradicted"},"c":{"state":"unresolved"},
+                "d":{"state":"unreported"}}}],"provenance":[]})
+        summary='\n'.join(rendered['resolution']);detail='\n'.join(rendered['expanded'])
+        self.assertIn("Dimensiones: 1 con apoyo · 1 contradichas · 1 sin resolver",summary)
+        for expected in ["a: supported","b: contradicted","c: unresolved","d: unreported"]:
+            self.assertIn(expected,detail)
+
+    def test_long_ids_fingerprints_are_not_rendered_until_details_are_expanded(self):
+        long_value="hash-"+"a"*120
+        rendered=self.render_scientific_and_verdict_history({"scientific_resolution_history":[
+            {"resolution_id":long_value,"resolution":"supported","operation_id":long_value,
+             "input_fingerprint":long_value,"evidence_ids":[long_value]}],"provenance":[]})
+        self.assertNotIn(long_value,'\n'.join(rendered['resolution']))
+        self.assertIn(long_value,'\n'.join(rendered['expanded']))
+
+    def test_expanded_scientific_resolution_detail_retains_all_available_technical_fields(self):
+        raw={"resolution_id":"resolution-complete","resolution":"supported","created_at":"2026-09-23T11:54:00Z",
+             "operation_id":"operation-full","claim_version":7,"input_fingerprint":"fingerprint-full",
+             "limitations":["limitation one","limitation two"],"dimensions":{"population":{"state":"supported"}},
+             "evidence_links":[{"source_id":"source-full","evidence_id":"evidence-full"}],
+             "metadata":{"review":"retained"}}
+        rendered=self.render_scientific_and_verdict_history({"scientific_resolution_history":[raw],"provenance":[]})
+        expanded='\n'.join(rendered['expanded'])
+        for expected in ["operation-full","Versión de afirmación: 7","fingerprint-full","population: supported",
+                         "limitation one; limitation two","source-full/evidence-full","resolution-complete",
+                         "Metadatos técnicos",'"review": "retained"']:
+            self.assertIn(expected,expanded)
+        self.assertNotIn("Metadatos técnicos",'\n'.join(rendered['resolution']))
+
+    def test_resolution_history_order_is_stable_for_tied_and_undated_records(self):
+        claim={"scientific_resolution_history":[
+            {"resolution_id":"tie-b","resolution":"supported","created_at":"2026-09-23T11:54:00Z"},
+            {"resolution_id":"unknown-z","resolution":"unresolved"},
+            {"resolution_id":"tie-a","resolution":"contradicted","created_at":"2026-09-23T11:54:00Z"}],"provenance":[]}
+        first=self.render_scientific_and_verdict_history(claim)['resolution']
+        second=self.render_scientific_and_verdict_history(claim)['resolution']
+        self.assertEqual(first,second)
+        summary='\n'.join(first)
+        self.assertLess(summary.index("CONTRADICTED"),summary.index("SUPPORTED"))
+        self.assertLess(summary.index("SUPPORTED"),summary.index("UNRESOLVED"))
 
     def test_activity_uses_claim_timeline_without_duplicate_reevaluation_events(self):
         data={"activity_timeline":[
