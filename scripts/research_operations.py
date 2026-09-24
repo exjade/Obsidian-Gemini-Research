@@ -60,7 +60,14 @@ def _atomic_json(path: Path, value: Any) -> None:
 
 
 class OperationStore:
-    """Append-only artifacts plus an atomically replaced operation projection."""
+    """Append-only artifacts plus an atomically replaced operation projection.
+
+    requested_at is the durable request instant; created_at is the operation
+    record creation instant (equal for new records). started_at is the first
+    queued-to-running transition. updated_at marks each persisted mutation.
+    finished_at marks the current terminal attempt and is cleared on retry;
+    earlier attempt times remain in attempt_history. All new values are UTC.
+    """
     def __init__(self, root: str | Path):
         self.root = Path(root)
 
@@ -160,8 +167,12 @@ class OperationStore:
 
     def update(self, operation_id: str, **changes: Any) -> dict[str, Any]:
         record = self.load(operation_id)
+        # Lifecycle timestamps are store-owned, never caller-supplied.
+        for field in ("requested_at", "created_at", "started_at", "updated_at", "finished_at"):
+            changes.pop(field, None)
         previous_status=record.get("status");new_status=changes.get("status")
         now=utcnow()
+        record.update(changes)
         if new_status=="running" and previous_status!="running":
             attempts=record.setdefault("attempt_history",[])
             number=len(attempts)+1
@@ -174,7 +185,9 @@ class OperationStore:
             if attempts and not attempts[-1].get("finished_at"):
                 attempts[-1].update(finished_at=now,status=new_status)
                 if changes.get("error"):attempts[-1]["error"]=changes["error"]
-        record.update(changes, updated_at=utcnow())
+        # One timestamp represents this persisted transition and all fields
+        # written by it (including attempt start/finish and updated_at).
+        record["updated_at"]=now
         _atomic_json(self.folder(operation_id) / "operation.json", record)
         return record
 

@@ -34,6 +34,10 @@ def record(case_id,claim_id,actor,decision,indices,notes,limits,expected_fingerp
              'decision':decision,'notes':notes.strip(),'limits':limits.strip(),
              'examined_evidence':[{'index':i,'evidence':evidence[i]} for i in indices],
              'automatic_verdict_changed':False}
+    # Keep version provenance only when the claim already has one. Legacy claims
+    # without a persisted version must remain explicitly version-unknown.
+    if claim.get('claim_version') is not None:
+        receipt['claim_version']=claim['claim_version']
     target=folder/'revisiones-humanas';target.mkdir(exist_ok=True)
     with (target/(receipt['id']+'.json')).open('x',encoding='utf-8') as stream:
         json.dump(receipt,stream,ensure_ascii=False,indent=2)

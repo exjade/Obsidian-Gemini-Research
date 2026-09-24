@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -61,6 +62,30 @@ class AutomaticResearchTests(unittest.TestCase):
                         "purpose":"support"})
         return {"matrix":matrix,"gaps":[],"competing_hypotheses":["H1","H0"],
                 "falsification_criteria":["Direct contradictory result"],"retrieval_targets":targets}
+
+    def test_case_activity_is_a_deterministic_projection_of_persisted_records(self):
+        claim={"id":"claim-1","timeline":[
+            {"event_id":"claim-event","event_type":"investigation.failed","timestamp":"2026-09-23T10:00:00Z",
+             "source_record_type":"claim_research","source_record_id":"op-1","title":"Investigación fallida",
+             "text":"Timeout","claim_id":"claim-1","target_view":"claims","sequence":0},
+            {"event_id":"receipt-event","event_type":"investigation.tool_receipt","timestamp":"2026-09-23T09:00:00Z",
+             "source_record_type":"action_trace.receipt","source_record_id":"run-1:pass2","title":"Recopilación · Proveedor terminó",
+             "text":"12 segundos. Recopilación anterior reutilizada.","claim_id":"claim-1","target_view":"claims","sequence":0}
+        ]}
+        meta={"created_at":"2026-09-18T00:00:00Z","scope_history":[
+            {"id":"scope-1","status":"proposed","created_at":"2026-09-20T00:00:00Z","decision_reason":"Review"}
+        ]}
+        local_documents=[{"id":"doc-1","imports":[{"case_id":"case-1","claim_id":"claim-1",
+            "filename":"paper.pdf","imported_at":"2026-09-19T00:00:00Z"}],"extractions":[],"identity_reviews":[]}]
+        first=frontend.project_case_activity("case-1",meta,[claim],local_documents)
+        second=frontend.project_case_activity("case-1",meta,[claim],local_documents)
+        self.assertEqual(first,second)
+        self.assertEqual(len(first),len({row["event_id"] for row in first}))
+        self.assertEqual([row["event_type"] for row in first],
+                         ["case.created","document.imported","scope.proposed","investigation.tool_receipt","investigation.failed"])
+        self.assertEqual(first[1]["claim_id"],"claim-1")
+        self.assertEqual(first[1]["target_view"],"claims")
+        self.assertEqual(first[-1]["source_record_id"],"op-1")
 
     def test_planner_requires_explicit_contradiction_coverage_only_for_declared_dimensions(self):
         valid=self._planner_result()
@@ -629,8 +654,12 @@ class AutomaticResearchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             store=research_operations.OperationStore(Path(temp)/'ops')
             first=store.create_with_id(operation_id,'case','claim','A synthetic claim')
-            failed=store.update(operation_id,status='failed',stage='failed',
-                error={'type':'fixture','message':'retain'},updated_at='fixed-timestamp')
+            with patch.object(research_operations,'utcnow',return_value='2026-09-23T12:02:00+00:00'):
+                failed=store.update(operation_id,status='failed',stage='failed',
+                    error={'type':'fixture','message':'retain'},updated_at='fixed-timestamp',
+                    finished_at='invented-timestamp')
+            self.assertEqual(failed['updated_at'],'2026-09-23T12:02:00+00:00')
+            self.assertEqual(failed['finished_at'],failed['updated_at'])
             artifact=store.artifact(operation_id,'agent-results',{'role':'planner','result':{'ok':True}})
             checkpoint=store.folder(operation_id)/artifact['path']
             before=(checkpoint.read_bytes(),(store.folder(operation_id)/'operation.json').read_bytes(),
@@ -642,6 +671,30 @@ class AutomaticResearchTests(unittest.TestCase):
             self.assertEqual(second,failed)
             self.assertEqual(second['operation_id'],first['operation_id'])
             self.assertEqual(after,before)
+
+    def test_operation_store_timestamps_are_utc_and_retry_keeps_original_request(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store=research_operations.OperationStore(Path(temp)/'ops')
+            with patch.object(research_operations,'utcnow',return_value='2026-09-23T12:00:00+00:00'):
+                created=store.create('case','claim','Synthetic claim')
+            for field in ('requested_at','created_at','updated_at'):
+                parsed=dt.datetime.fromisoformat(created[field])
+                self.assertIsNotNone(parsed.tzinfo)
+                self.assertEqual(parsed.utcoffset(),dt.timedelta(0))
+            self.assertEqual(created['requested_at'],created['created_at'])
+            self.assertEqual(created['created_at'],created['updated_at'])
+            original=(created['requested_at'],created['created_at'])
+            with patch.object(research_operations,'utcnow',return_value='2026-09-23T12:01:00+00:00'):
+                running=store.update(created['operation_id'],status='running')
+            self.assertEqual(running['started_at'],running['updated_at'])
+            self.assertEqual(running['attempt_history'][0]['started_at'],running['updated_at'])
+            with patch.object(research_operations,'utcnow',return_value='2026-09-23T12:02:00+00:00'):
+                failed=store.update(created['operation_id'],status='failed',error={'message':'synthetic'})
+            self.assertEqual(failed['finished_at'],failed['updated_at'])
+            self.assertEqual(failed['attempt_history'][0]['finished_at'],failed['updated_at'])
+            retry=store.update(created['operation_id'],status='queued')
+            self.assertEqual((retry['requested_at'],retry['created_at']),original)
+            self.assertEqual(retry['attempt_history'][0]['finished_at'],failed['finished_at'])
 
     def test_create_with_id_concurrent_duplicate_converges_without_mixing(self):
         operation_id='e'*32
@@ -762,14 +815,16 @@ class AutomaticResearchTests(unittest.TestCase):
             old=frontend.INTEL
             try:
                 frontend.INTEL=Path(temp)
-                first,created=frontend.operation_start('claim_research','case','claim')
+                inputs={'evidence_mode':'documents_only','document_ids':['doc-1']}
+                first,created=frontend.operation_start('claim_research','case','claim',inputs)
                 self.assertTrue(created)
                 frontend.operation_update(first['id'],status='error',error='bad json')
-                retried,restarted=frontend.operation_start('claim_research','case','claim')
+                retried,restarted=frontend.operation_start('claim_research','case','claim',inputs)
                 self.assertTrue(restarted)
                 self.assertEqual(retried['id'],first['id'])
                 self.assertEqual(retried['status'],'queued')
                 self.assertIsNone(retried['error'])
+                self.assertEqual(retried['input_fingerprint'],first['input_fingerprint'])
             finally:frontend.INTEL=old
 
     def test_explicit_new_run_after_completed_research_uses_new_id_and_preserves_result(self):
@@ -783,10 +838,204 @@ class AutomaticResearchTests(unittest.TestCase):
                 second,created_again=frontend.operation_start('claim_research','case','claim',new_run=True)
                 self.assertTrue(created_again)
                 self.assertNotEqual(second['id'],first['id'])
+                self.assertEqual(second['input_fingerprint'],completed['input_fingerprint'])
                 self.assertEqual(second['new_run_of'],first['id'])
+                self.assertTrue(second['new_run'])
+                self.assertEqual(second['new_run_reason'],'explicit_new_run')
+                self.assertIsNone(second['result'])
+                self.assertIsNone(second['error'])
                 self.assertEqual(frontend.operation_read(first['id'])['result'],completed['result'])
                 self.assertEqual(second['requested_at'],second['updated_at'])
+                for field in ('requested_at','created_at','updated_at'):
+                    parsed=dt.datetime.fromisoformat(second[field])
+                    self.assertIsNotNone(parsed.tzinfo)
+                    self.assertEqual(parsed.utcoffset(),dt.timedelta(0))
             finally:frontend.INTEL=old
+
+    def test_new_run_after_failure_is_distinct_and_does_not_inherit_attempt_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                root=Path(temp);frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                inputs={'evidence_mode':'documents_plus_search','document_ids':['doc-1']}
+                failed,created=frontend.operation_start('claim_research','case','claim',inputs)
+                self.assertTrue(created)
+                engine=research_operations.store(root).create_with_id(failed['id'],'case','claim','Synthetic claim',
+                    evidence_mode='documents_plus_search',document_ids=['doc-1'])
+                checkpoint=research_operations.store(root).artifact(failed['id'],'agent-results',
+                    {'manifest':{'agent':'planner'},'checkpoint':'only operation A'})
+                frontend.operation_update(failed['id'],status='running',stage='retriever')
+                failed=frontend.operation_update(failed['id'],status='failed',
+                    error={'type':'ValueError','message':'first attempt failed'})
+                retried,retry_created=frontend.operation_start('claim_research','case','claim',inputs)
+                self.assertTrue(retry_created)
+                self.assertEqual(retried['id'],failed['id'])
+                reused=research_operations.store(root).create_with_id(failed['id'],'case','claim','Synthetic claim',
+                    evidence_mode='documents_plus_search',document_ids=['doc-1'])
+                self.assertEqual(reused['operation_id'],engine['operation_id'])
+                self.assertEqual(len(list((research_operations.store(root).folder(failed['id'])/
+                    'artifacts'/'agent-results').glob('*.json'))),1)
+                frontend.operation_update(failed['id'],status='running',stage='retriever')
+                failed=frontend.operation_update(failed['id'],status='failed',
+                    error={'type':'ValueError','message':'second attempt failed'})
+                new,created=frontend.operation_start('claim_research','case','claim',inputs,new_run=True)
+                self.assertTrue(created)
+                self.assertNotEqual(new['id'],failed['id'])
+                self.assertEqual(new['input_fingerprint'],failed['input_fingerprint'])
+                self.assertEqual(new['new_run_of'],failed['id'])
+                self.assertEqual(new['status'],'queued')
+                self.assertIsNone(new['result']);self.assertIsNone(new['error'])
+                self.assertNotIn('attempt_history',new)
+                self.assertEqual(frontend.operation_read(failed['id'])['error'],
+                    {'type':'ValueError','message':'second attempt failed'})
+                new_engine=research_operations.store(root).create_with_id(new['id'],'case','claim','Synthetic claim',
+                    evidence_mode='documents_plus_search',document_ids=['doc-1'])
+                self.assertNotEqual(new_engine['operation_id'],engine['operation_id'])
+                new_artifacts=research_operations.store(root).folder(new['id'])/'artifacts'/'agent-results'
+                self.assertFalse(new_artifacts.exists())
+                self.assertTrue((research_operations.store(root).folder(failed['id'])/checkpoint['path']).exists())
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_claim_research_active_requests_coalesce_even_when_new_run_requested(self):
+        for active_status in ('queued','running'):
+            with self.subTest(status=active_status),tempfile.TemporaryDirectory() as temp:
+                old=frontend.INTEL
+                try:
+                    frontend.INTEL=Path(temp)
+                    inputs={'evidence_mode':'question_search','document_ids':[]}
+                    first,created=frontend.operation_start('claim_research','case','claim',inputs)
+                    self.assertTrue(created)
+                    if active_status=='running':
+                        first=frontend.operation_update(first['id'],status='running')
+                    second,created_again=frontend.operation_start('claim_research','case','claim',inputs,new_run=True)
+                    self.assertFalse(created_again)
+                    self.assertEqual(second['id'],first['id'])
+                    self.assertEqual(len(frontend.operations_for('case','claim')),1)
+                    response=frontend._claim_research_start_response(second,created=False,
+                        new_run_requested=True,coalesced=True)
+                    self.assertTrue(response['deduplicated'])
+                    self.assertTrue(response['coalesced'])
+                    self.assertFalse(response['new_run'])
+                    self.assertTrue(response['new_run_requested'])
+                    self.assertFalse(response['retry'])
+                finally:frontend.INTEL=old
+
+    def test_claim_research_start_response_does_not_mislabel_completed_retry_history(self):
+        completed={'id':'completed-op','kind':'claim_research','status':'done',
+                   'attempt_history':[{'number':1,'status':'done'}]}
+        deduped=frontend._claim_research_start_response(completed,created=False,
+            new_run_requested=False)
+        self.assertTrue(deduped['deduplicated'])
+        self.assertFalse(deduped['retry'])
+        retry={'id':'retry-op','kind':'claim_research','status':'queued',
+               'retry_requested_at':'2026-09-23T12:00:00+00:00'}
+        retried=frontend._claim_research_start_response(retry,created=True,
+            new_run_requested=False)
+        self.assertFalse(retried['deduplicated'])
+        self.assertTrue(retried['retry'])
+        self.assertFalse(retried['new_run'])
+        new_run=frontend._claim_research_start_response({'id':'new-op'},created=True,
+            new_run_requested=True)
+        self.assertTrue(new_run['new_run'])
+        self.assertFalse(new_run['retry'])
+
+    def test_frontend_transition_uses_one_utc_timestamp_for_attempt_and_projection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old=frontend.INTEL
+            try:
+                frontend.INTEL=Path(temp)
+                operation,_=frontend.operation_start('claim_research','case','claim')
+                for field in ('requested_at','created_at','updated_at'):
+                    parsed=dt.datetime.fromisoformat(operation[field])
+                    self.assertIsNotNone(parsed.tzinfo)
+                    self.assertEqual(parsed.utcoffset(),dt.timedelta(0))
+                self.assertEqual(operation['requested_at'],operation['created_at'])
+                self.assertEqual(operation['created_at'],operation['updated_at'])
+                started_at='2026-09-23T12:01:00+00:00'
+                with patch.object(frontend,'utcnow',return_value=started_at) as clock:
+                    running=frontend.operation_update(operation['id'],status='running',
+                        created_at='invented-timestamp',started_at='invented-timestamp',updated_at='invented-timestamp')
+                self.assertEqual(clock.call_count,1)
+                self.assertEqual(running['started_at'],started_at)
+                self.assertEqual(running['attempt_history'][0]['started_at'],started_at)
+                self.assertEqual(running['updated_at'],started_at)
+                finished_at='2026-09-23T12:02:00+00:00'
+                with patch.object(frontend,'utcnow',return_value=finished_at) as clock:
+                    failed=frontend.operation_update(operation['id'],status='failed',error={'message':'fixture'})
+                self.assertEqual(clock.call_count,1)
+                self.assertEqual(failed['finished_at'],finished_at)
+                self.assertEqual(failed['attempt_history'][0]['finished_at'],finished_at)
+                self.assertEqual(failed['updated_at'],finished_at)
+            finally:frontend.INTEL=old
+
+    def test_operation_read_does_not_fill_missing_legacy_timestamp_fields(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                root=Path(temp);frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation_id='a'*32
+                frontend.operation_write({'id':operation_id,'operation_id':operation_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'failed','requested_at':'2026-09-20T10:00:00Z',
+                    'updated_at':'2026-09-24T10:00:00Z','result':None,'error':{'message':'preserve'}})
+                engine_path=root/'.project-intelligence'/'claim-research'/operation_id/'operation.json'
+                engine_path.parent.mkdir(parents=True)
+                engine_path.write_text(json.dumps({'operation_id':operation_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'failed','created_at':'2026-09-20T10:01:00Z',
+                    'updated_at':'2026-09-24T10:01:00Z','result':None,'error':None}),encoding='utf-8')
+                merged=frontend.operation_read(operation_id)
+                self.assertEqual(merged['requested_at'],'2026-09-20T10:00:00Z')
+                self.assertEqual(merged['created_at'],'2026-09-20T10:01:00Z')
+                self.assertEqual(merged['updated_at'],'2026-09-24T10:01:00Z')
+                self.assertIsNone(merged['started_at'])
+                self.assertIsNone(merged['finished_at'])
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_operation_read_merges_same_timestamps_by_their_temporal_meaning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                root=Path(temp);frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation_id='b'*32
+                frontend.operation_write({'id':operation_id,'operation_id':operation_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'running','requested_at':'2026-09-23T12:00:00+02:00',
+                    'created_at':'2026-09-23T12:01:00+02:00','started_at':'2026-09-23T12:02:00+02:00',
+                    'updated_at':'2026-09-23T12:00:00+02:00','finished_at':'2026-09-23T12:30:00+02:00',
+                    'result':None,'error':None})
+                engine_path=root/'.project-intelligence'/'claim-research'/operation_id/'operation.json'
+                engine_path.parent.mkdir(parents=True)
+                engine_path.write_text(json.dumps({'operation_id':operation_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'running','requested_at':'2026-09-23T10:30:00Z',
+                    'created_at':'2026-09-23T10:30:00Z','started_at':'2026-09-23T11:00:00Z',
+                    'updated_at':'2026-09-23T10:30:00Z','finished_at':'2026-09-23T10:00:00Z',
+                    'result':None,'error':None}),encoding='utf-8')
+                merged=frontend.operation_read(operation_id)
+                # Earlier request/create/start wins after comparing offsets;
+                # latest update/finish wins. The stored string is preserved.
+                self.assertEqual(merged['requested_at'],'2026-09-23T12:00:00+02:00')
+                self.assertEqual(merged['created_at'],'2026-09-23T12:01:00+02:00')
+                self.assertEqual(merged['started_at'],'2026-09-23T12:02:00+02:00')
+                self.assertEqual(merged['updated_at'],'2026-09-23T10:30:00Z')
+                self.assertEqual(merged['finished_at'],'2026-09-23T12:30:00+02:00')
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
+
+    def test_operation_read_keeps_frontend_values_when_they_are_later_updates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            try:
+                root=Path(temp);frontend.INTEL=root/'.project-intelligence';frontend.ROOT=root
+                operation_id='c'*32
+                frontend.operation_write({'id':operation_id,'operation_id':operation_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'done','updated_at':'2026-09-23T12:00:00Z',
+                    'finished_at':'2026-09-23T12:30:00Z','result':{'outcome':'done'},'error':None})
+                engine_path=root/'.project-intelligence'/'claim-research'/operation_id/'operation.json'
+                engine_path.parent.mkdir(parents=True)
+                engine_path.write_text(json.dumps({'operation_id':operation_id,'kind':'claim_research',
+                    'case_id':'case','claim_id':'claim','status':'done','updated_at':'2026-09-23T09:00:00-02:00',
+                    'finished_at':'2026-09-23T09:30:00-02:00','result':{'outcome':'done'},'error':None}),encoding='utf-8')
+                merged=frontend.operation_read(operation_id)
+                self.assertEqual(merged['updated_at'],'2026-09-23T12:00:00Z')
+                self.assertEqual(merged['finished_at'],'2026-09-23T12:30:00Z')
+            finally:frontend.INTEL,frontend.ROOT=old_intel,old_root
 
     def test_failed_retry_reuses_id_inputs_and_original_request_time(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -811,6 +1060,12 @@ class AutomaticResearchTests(unittest.TestCase):
                 self.assertEqual(retried['attempt_history'][0]['finished_at'],finished_before_retry)
                 self.assertEqual(retried['attempt_history'][0]['error']['message'],'provider failure')
                 self.assertTrue(retried['requested_at'].endswith('+00:00'))
+                first_started=retried['started_at']
+                retried_running=frontend.operation_update(retried['id'],status='running',stage='retriever')
+                self.assertEqual(retried_running['started_at'],first_started)
+                self.assertEqual(len(retried_running['attempt_history']),2)
+                self.assertEqual(retried_running['attempt_history'][0]['finished_at'],finished_before_retry)
+                self.assertIsNotNone(retried_running['attempt_history'][1]['started_at'])
             finally:frontend.INTEL=old
 
     def test_claim_operation_history_keeps_result_and_scoped_failure_separate(self):
@@ -869,27 +1124,118 @@ class AutomaticResearchTests(unittest.TestCase):
             case=Path(temp)/'case';case.mkdir()
             library.save(case/'claims.json',[{'id':'claim','claim':'A synthetic claim','status':'UNSUPPORTED','evidence':[]}])
             library.save(case/'case.json',{})
+            question={'operation_id':'question-id','id':'question-id','kind':'claim_research','case_id':'case','claim_id':'claim',
+                'requested_at':'2026-09-21T09:00:00Z','finished_at':'2026-09-21T10:00:00Z','status':'done',
+                'result':{'outcome':'supported'},'evidence_mode':'question_search','document_ids':[],
+                'claim_version':1,'input_fingerprint':'question-fp','stage':'done',
+                'progress':{'queries':6,'pages':8,'elapsed_seconds':300},'budget_plan':{'target_cap':6}}
             completed={'operation_id':'done-id','id':'done-id','kind':'claim_research','case_id':'case','claim_id':'claim',
                 'requested_at':'2026-09-22T09:00:00Z','finished_at':'2026-09-22T10:00:00Z','status':'done',
-                'result':{'outcome':'indeterminate'},'evidence_mode':'documents_only','document_ids':['doc-1'],
-                'input_data':{'document_ids':['doc-1']}}
+                'result':{'outcome':'indeterminate','budget_receipts':[{'round':1}]},
+                'evidence_mode':'documents_only','document_ids':['doc-1'],'claim_version':2,
+                'input_fingerprint':'docs-fp','stage':'audit','progress':{'queries':0,'pages':2},
+                'budget_plan':{'target_cap':0},'input_data':{'document_ids':['doc-1']}}
             failed={'operation_id':'failed-id','id':'failed-id','kind':'claim_research','case_id':'case','claim_id':'claim',
                 'requested_at':'2026-09-23T09:00:00Z','finished_at':'2026-09-23T09:01:00Z','status':'failed',
-                'error':{'type':'ValueError','message':'scoped failure'}}
-            with patch.object(frontend,'operations_for',return_value=[failed,completed]), \
+                'error':{'type':'ValueError','message':'scoped failure'},
+                'evidence_mode':'documents_plus_search','document_ids':['doc-2'],'claim_version':3,
+                'input_fingerprint':'mixed-fp','stage':'retriever','progress':{'queries':2,'pages':1},
+                'budget_plan':{'target_cap':3}}
+            other_claim={**question,'operation_id':'other-claim','id':'other-claim','claim_id':'other'}
+            with patch.object(frontend,'operations_for',return_value=[failed,completed,question,other_claim]), \
                  patch.object(frontend.human_review,'history',return_value=[]), \
                  patch.object(frontend.revisions,'history',return_value=[]), \
                  patch.object(frontend.action_trace,'for_claim',return_value=[]), \
                  patch.object(frontend.action_trace,'summary_for_claim',return_value={}), \
                  patch.object(frontend.action_trace,'receipts_for_claim',return_value=[]):
                 claim=frontend.case_claims(case)[0]
-            self.assertEqual([row['operation_id'] for row in claim['investigation_history']],['failed-id','done-id'])
+            self.assertEqual([row['operation_id'] for row in claim['investigation_history']],['failed-id','done-id','question-id'])
             self.assertEqual(claim['latest_investigation']['operation_id'],'failed-id')
             self.assertEqual(claim['latest_investigation']['error']['message'],'scoped failure')
             self.assertEqual(claim['current_completed_investigation']['operation_id'],'done-id')
             self.assertEqual(claim['current_completed_investigation']['result']['outcome'],'indeterminate')
             self.assertEqual(claim['current_completed_investigation']['evidence_mode'],'documents_only')
             self.assertEqual(claim['current_completed_investigation']['document_ids'],['doc-1'])
+            history=claim['investigation_history']
+            self.assertEqual([row['evidence_mode'] for row in history],
+                ['documents_plus_search','documents_only','question_search'])
+            self.assertEqual([row['document_ids'] for row in history],[['doc-2'],['doc-1'],[]])
+            self.assertEqual([row['input_fingerprint'] for row in history],['mixed-fp','docs-fp','question-fp'])
+            self.assertEqual([row['stage'] for row in history],['retriever','audit','done'])
+            self.assertEqual(history[0]['progress'],{'queries':2,'pages':1})
+            self.assertEqual(history[1]['budget_receipts'],[{'round':1}])
+            self.assertEqual([row['is_current_result'] for row in history],[False,True,False])
+            self.assertEqual(history[0]['error']['message'],'scoped failure')
+
+    def test_case_claims_uses_canonical_timeline_and_keeps_specialized_histories(self):
+        with tempfile.TemporaryDirectory() as temp:
+            case=Path(temp)/'case';case.mkdir()
+            original={'id':'claim','claim':'A synthetic claim','status':'UNSUPPORTED','claim_version':2,
+                'created_at':'2026-09-17T00:00:00Z','evidence':[], 'provenance':[{'id':'verdict',
+                'previous_status':'PENDING','status':'UNSUPPORTED','reviewed_at':'2026-09-18T12:00:00Z'}]}
+            child={'id':'child','claim':'Narrower claim','status':'UNVERIFIED','parent_claim_id':'claim',
+                'evidence':[],'verdict_inherited':False,'evidence_inherited':False}
+            library.save(case/'claims.json',[original,child])
+            library.save(case/'case.json',{'scope_history':[{'id':'scope','status':'approved',
+                'approved_at':'2026-09-18T13:00:00Z','selected_ids':['claim']}],
+                'claim_reformulation_history':[
+                    {'id':'proposal','parent_claim_id':'claim','revised_claim_id':'child',
+                     'revised_claim':'Narrower claim','status':'proposed','created_at':'2026-09-23T16:30:00Z',
+                     'actor':'Ana','reason':'Narrow the horizon','retained_dimensions':['population']},
+                    {'id':'proposal','parent_claim_id':'claim','revised_claim_id':'child',
+                     'revised_claim':'Narrower claim','status':'approved','created_at':'2026-09-23T16:30:00Z',
+                     'approved_at':'2026-09-23T17:00:00Z','approved_by':'Ana',
+                     'reason':'Narrow the horizon','retained_dimensions':['population']}]})
+            research={'operation_id':'research','id':'research','kind':'claim_research','case_id':'case',
+                'claim_id':'claim','requested_at':'2026-09-22T08:00:00Z','finished_at':'2026-09-22T09:00:00Z',
+                'status':'done','result':{'outcome':'supported'}}
+            technical={'operation_id':'technical','id':'technical','kind':'technical_check','case_id':'case',
+                'input_data':{'claim_ids':['claim']},'requested_at':'2026-09-23T10:00:00Z',
+                'finished_at':'2026-09-23T11:00:00Z','status':'done','result':{}}
+            with patch.object(frontend,'operations_for',return_value=[technical,research]), \
+                 patch.object(frontend.human_review,'history',return_value=[{'id':'review','claim_id':'claim',
+                    'actor':'Ana','decision':'keep_open','reviewed_at':'2026-09-23T16:00:00Z',
+                    'claim_version':2,'claim_fingerprint':'review-fp','automatic_status_at_review':'UNSUPPORTED',
+                    'automatic_verdict_changed':False,'notes':'Compared the passage','limits':'One document',
+                    'examined_evidence':[{'index':0,'evidence':{'type':'document','document_id':'doc-1',
+                        'evidence_id':'passage-1','path':'study.pdf'}}]}]), \
+                 patch.object(frontend.revisions,'history',return_value=[]), \
+                 patch.object(frontend.action_trace,'for_claim',return_value=[]), \
+                 patch.object(frontend.action_trace,'summary_for_claim',return_value={}), \
+                 patch.object(frontend.action_trace,'receipts_for_claim',return_value=[]):
+                projected_claims=frontend.case_claims(case)
+                claim=projected_claims[0]
+
+            self.assertEqual(claim['timeline'],frontend.claim_timeline.project_claim_timeline(
+                {**claim,'investigation_id':'case'},operations=[technical,research],
+                human_reviews=[{'id':'review','claim_id':'claim','actor':'Ana','decision':'keep_open',
+                                'reviewed_at':'2026-09-23T16:00:00Z','claim_version':2,
+                                'claim_fingerprint':'review-fp','automatic_status_at_review':'UNSUPPORTED',
+                                'automatic_verdict_changed':False,'notes':'Compared the passage','limits':'One document',
+                                'examined_evidence':[{'index':0,'evidence':{'type':'document','document_id':'doc-1',
+                                    'evidence_id':'passage-1','path':'study.pdf'}}]}],
+                reformulations=library.read(case/'case.json',{})['claim_reformulation_history'],
+                scope_history=library.read(case/'case.json',{})['scope_history'],
+                legacy_source_checks=[],revisions=[]))
+            self.assertIn('claim_research_history',claim)
+            self.assertIn('technical_check_history',claim)
+            self.assertEqual([row['operation_id'] for row in claim['claim_research_history']['operations']],
+                             ['research'])
+            self.assertEqual([row['operation_id'] for row in claim['technical_check_history']],['technical'])
+            events={row['event_type'] for row in claim['timeline']}
+            self.assertTrue({'evaluation.changed','claim.admitted','investigation.completed',
+                             'technical_check.completed','human_review.recorded',
+                             'reformulation.proposed','reformulation.approved'} <= events)
+            review=next(row for row in claim['timeline'] if row['event_type']=='human_review.recorded')
+            self.assertEqual(review['details']['claim_version'],2)
+            self.assertEqual(review['details']['examined_evidence_refs'][0]['evidence_id'],'passage-1')
+            child_timeline=projected_claims[1]['timeline']
+            child_event=next(row for row in child_timeline if row['event_type']=='claim.child_created')
+            self.assertEqual(child_event['details']['parent_claim_id'],'claim')
+            self.assertEqual(child_event['details']['child_claim_id'],'child')
+            self.assertEqual(projected_claims[1]['status'],'UNVERIFIED')
+            self.assertEqual(projected_claims[1]['evidence'],[])
+            self.assertEqual(library.read(case/'claims.json',[]),[original,child])
 
     def test_claim_history_includes_only_explicitly_associated_technical_checks(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -927,6 +1273,38 @@ class AutomaticResearchTests(unittest.TestCase):
                 self.assertEqual({row['claim_id'] for row in finished['result']['source_receipts']},{'claim-a','claim-b'})
                 self.assertEqual({row['source_check_id'] for row in finished['result']['source_receipts']},{'receipt-1'})
                 self.assertEqual([row['status'] for row in library.read(case/'claims.json',[])],['UNSUPPORTED','VERIFIED'])
+            finally:
+                frontend.INTEL,frontend.ROOT=old_intel,old_root;frontend.JOB.clear();frontend.JOB.update(old_job)
+
+    def test_technical_check_keeps_scientific_resolution_and_failed_research_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);case=root/'case';case.mkdir();intel=root/'.project-intelligence'
+            evidence={'type':'external','source_id':'source-1','url':'https://example.org/paper','excerpt':'literal passage'}
+            resolution={'resolution_id':'resolution-1','resolution':'indeterminate','limitations':['No delayed measure']}
+            claims=[{'id':'claim-a','claim':'A','status':'UNSUPPORTED','evidence':[evidence],
+                     'scientific_resolution':resolution,'scientific_resolution_history':[resolution]}]
+            library.save(case/'claims.json',claims)
+            old_intel,old_root=frontend.INTEL,frontend.ROOT
+            old_job=dict(frontend.JOB)
+            try:
+                frontend.INTEL=intel;frontend.ROOT=root
+                failed,_=frontend.operation_start('claim_research','case','claim-a',{'evidence_mode':'question_search'})
+                frontend.operation_update(failed['id'],status='failed',stage='retriever',error={'type':'AgentOutputError','message':'kept failure'})
+                technical,_=frontend.operation_start('technical_check','case','claim-a',{'claim_ids':['claim-a']})
+                receipt={'id':'receipt-1','checked_at':'2026-09-23T11:00:00+00:00','availability':'AVAILABLE',
+                         'excerpt_match':True,'eligible':True,'http_status':200,'final_url':evidence['url']}
+                with patch.object(library,'case_path',return_value=case),patch.object(frontend.source_check,'record_check',return_value=receipt):
+                    frontend.check_case_sources('case','claim-a',technical['id'])
+                persisted_claims=library.read(case/'claims.json',[])
+                self.assertEqual(persisted_claims,claims)
+                failed_after=frontend.operation_read(failed['id'])
+                technical_after=frontend.operation_read(technical['id'])
+                self.assertEqual((failed_after['kind'],failed_after['status']),('claim_research','failed'))
+                self.assertEqual(failed_after['error'],{'type':'AgentOutputError','message':'kept failure'})
+                self.assertEqual((technical_after['kind'],technical_after['status']),('technical_check','done'))
+                self.assertFalse(technical_after['result']['verdict_changed'])
+                self.assertEqual({row['kind'] for row in frontend.operations_for('case','claim-a')},{'claim_research','technical_check'})
+                self.assertNotEqual(failed_after['id'],technical_after['id'])
             finally:
                 frontend.INTEL,frontend.ROOT=old_intel,old_root;frontend.JOB.clear();frontend.JOB.update(old_job)
 

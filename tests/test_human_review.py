@@ -22,13 +22,21 @@ class HumanReviewTests(unittest.TestCase):
         args.update(changes)
         return h.record(**args)
     def test_observation_never_changes_verdict_and_keeps_snapshot(self):
-        c=self.reviewed_claim();before=p.all_claims()
+        c=self.reviewed_claim();c['claim_version']=4;p.persist([c,self.rows[1]]);library.refresh(p.all_claims());before=p.all_claims()
         receipt=self.submit(c)
         self.assertEqual(p.all_claims(),before)
         self.assertEqual(receipt['automatic_status_at_review'],'UNSUPPORTED')
         self.assertFalse(receipt['automatic_verdict_changed'])
+        self.assertEqual(receipt['claim_version'],4)
         self.assertEqual(receipt['examined_evidence'][0]['evidence'],c['evidence'][0])
         self.assertTrue((self.folder/'revisiones-humanas.md').exists())
+
+    def test_legacy_review_does_not_invent_claim_version(self):
+        c=self.reviewed_claim()
+        c.pop('claim_version',None)
+        p.persist([c,self.rows[1]]);library.refresh(p.all_claims())
+        receipt=self.submit(c)
+        self.assertNotIn('claim_version',receipt)
     def test_history_is_append_only_and_scoped(self):
         c=self.reviewed_claim();a=self.submit(c);b=self.submit(c,decision='uncertain')
         self.assertNotEqual(a['id'],b['id']);self.assertEqual(len(h.history('fixture-case')),2)

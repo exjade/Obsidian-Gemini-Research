@@ -66,6 +66,34 @@ def operation_path(operation_id):
     return operation_directory()/(operation_id+'.json')
 
 
+def _aware_timestamp(value):
+    """Parse an explicit aware ISO timestamp for comparison without rewriting it."""
+    if not isinstance(value,str) or not value.strip():return None
+    try:parsed=datetime.datetime.fromisoformat(value.replace('Z','+00:00'))
+    except (TypeError,ValueError,OverflowError):return None
+    if parsed.tzinfo is None:return None
+    try:return parsed.astimezone(datetime.timezone.utc)
+    except (ValueError,OverflowError):return None
+
+
+def _merge_timestamp(frontend_record,engine_record,field,*,latest,prefer):
+    """Merge the same temporal field, comparing aware values and preserving legacy text."""
+    values={'frontend':frontend_record.get(field),'engine':engine_record.get(field)}
+    present={source:value for source,value in values.items() if value is not None and value!=''}
+    if not present:return None
+    comparable={source:_aware_timestamp(value) for source,value in present.items()}
+    aware={source:value for source,value in comparable.items() if value is not None}
+    if aware:
+        # If only one copy is comparable, prefer it over a naive/invalid legacy
+        # value. With two aware copies, select the semantically first/last
+        # instant while returning its original string unchanged.
+        selected=min(aware,key=lambda source:aware[source]) if not latest else max(aware,key=lambda source:aware[source])
+        return present.get(prefer) if len(aware)>1 and aware.get(prefer)==aware[selected] and prefer in present else present[selected]
+    # Neither copy can be ordered safely. Retain one original legacy value by
+    # a documented stable source preference; never infer a timezone or mtime.
+    return present.get(prefer) or next(iter(present.values()))
+
+
 def operation_read(operation_id):
     """Return a scoped view retaining both frontend and engine records."""
     frontend_record=read_json(operation_path(operation_id),None)
@@ -88,10 +116,13 @@ def operation_read(operation_id):
     merged.update(id=operation_id,operation_id=operation_id,
         frontend_status=frontend_record.get('status'),engine_status=engine_record.get('status'),
         frontend_error=frontend_record.get('error'),engine_error=engine_record.get('error'),
-        requested_at=frontend_record.get('requested_at') or engine_record.get('requested_at') or engine_record.get('created_at'),
-        created_at=engine_record.get('created_at') or frontend_record.get('created_at') or frontend_record.get('requested_at'),
-        started_at=engine_record.get('started_at') or frontend_record.get('started_at'),
-        finished_at=engine_record.get('finished_at') or frontend_record.get('finished_at'))
+        # Timestamp fields have distinct meanings; merge only like-for-like
+        # values so legacy gaps remain unknown instead of being fabricated.
+        requested_at=_merge_timestamp(frontend_record,engine_record,'requested_at',latest=False,prefer='frontend'),
+        created_at=_merge_timestamp(frontend_record,engine_record,'created_at',latest=False,prefer='frontend'),
+        started_at=_merge_timestamp(frontend_record,engine_record,'started_at',latest=False,prefer='frontend'),
+        updated_at=_merge_timestamp(frontend_record,engine_record,'updated_at',latest=True,prefer='engine'),
+        finished_at=_merge_timestamp(frontend_record,engine_record,'finished_at',latest=True,prefer='engine'))
     engine_status=engine_record.get('status');front_status=frontend_record.get('status')
     terminal={'done','resolved','completed_with_limits','failed','error','cancelled'}
     merged['status']=engine_status if engine_status in terminal else (front_status or engine_status)
@@ -110,8 +141,13 @@ def operation_update(operation_id, **changes):
     with OPERATION_LOCK:
         record=read_json(operation_path(operation_id),None)
         if not record:raise ValueError('Operación inexistente')
+        # Lifecycle timestamps are store-owned; callers may update business
+        # fields but cannot rewrite request/create/first-start history.
+        for field in ('requested_at','created_at','started_at','updated_at','finished_at'):
+            changes.pop(field,None)
         old_status=record.get('status');new_status=changes.get('status')
         now=utcnow()
+        record.update(changes)
         if new_status=='running' and old_status!='running':
             record.setdefault('attempt_history',[])
             attempt_number=len(record['attempt_history'])+1
@@ -125,7 +161,7 @@ def operation_update(operation_id, **changes):
             if attempts and not attempts[-1].get('finished_at'):
                 attempts[-1]['finished_at']=now;attempts[-1]['status']=new_status
                 if changes.get('error'):attempts[-1]['error']=changes['error']
-        record.update(changes);record['updated_at']=utcnow()
+        record['updated_at']=now
         return operation_write(record)
 
 
@@ -133,12 +169,12 @@ def operation_start(kind,case_id,claim_id=None,input_data=None,new_run=False):
     """Create one durable operation and coalesce repeated clicks while it runs."""
     if type(new_run) is not bool or (new_run and kind!='claim_research'):
         raise ValueError('new_run sólo se admite como booleano en investigaciones de afirmaciones')
+    fingerprint=hashlib.sha256(json.dumps(input_data or {},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     with OPERATION_LOCK:
         directory=operation_directory();directory.mkdir(parents=True,exist_ok=True)
         previous=[]
         for path in directory.glob('*.json'):
             current=read_json(path,{})
-            fingerprint=hashlib.sha256(json.dumps(input_data or {},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
             same=(current.get('input_fingerprint') or hashlib.sha256(b'{}').hexdigest())==fingerprint
             if same and (current.get('kind'),current.get('case_id'),current.get('claim_id'))==(kind,case_id,claim_id) and current.get('status') in ('queued','running'):
                 return current,False
@@ -158,11 +194,15 @@ def operation_start(kind,case_id,claim_id=None,input_data=None,new_run=False):
             failed=[row for row in previous if row.get('input_fingerprint')==fingerprint and row.get('status') in ('error','failed')]
             if failed:
                 record=max(failed,key=lambda row:row.get('updated_at',''))
+                now=utcnow()
                 record.update(status='queued',stage='Reanudando desde el último avance',
                               progress={'current':0,'total':3,'unit':'rondas'},error=None,
-                              retry_requested_at=utcnow(),updated_at=utcnow(),finished_at=None)
+                              retry_requested_at=now,updated_at=now,finished_at=None)
                 return operation_write(record),True
         prior=sorted(previous,key=lambda row:(row.get('requested_at') or row.get('created_at') or '',row.get('id','')),reverse=True)
+        # requested_at records the durable request; created_at records when
+        # this persisted row was created. They share the initial instant but
+        # remain separate fields for legacy compatibility and future schemas.
         now=utcnow();record={'id':uuid.uuid4().hex,'kind':kind,'case_id':case_id,'claim_id':claim_id,
             'input_data':input_data or {},'input_fingerprint':hashlib.sha256(json.dumps(input_data or {},sort_keys=True,ensure_ascii=False).encode()).hexdigest(),
             'status':'queued','stage':'En espera','progress':{'current':0,'total':0},
@@ -170,6 +210,16 @@ def operation_start(kind,case_id,claim_id=None,input_data=None,new_run=False):
         if new_run:
             record.update(new_run=True,new_run_reason='explicit_new_run',new_run_of=prior[0].get('id') if prior else None)
         return operation_write(record),True
+
+
+def _claim_research_start_response(operation, *, created, new_run_requested, coalesced=False):
+    """Describe what this request did, separately from operation provenance."""
+    retry=bool(created and not new_run_requested and operation.get('retry_requested_at'))
+    new_run_created=bool(created and new_run_requested)
+    return {'operation_id':operation['id'],'kind':'claim_research',
+            'deduplicated':not created,'coalesced':bool(coalesced),
+            'new_run':new_run_created,'new_run_requested':bool(new_run_requested),
+            'retry':retry}
 
 
 def _merge_operation_records(operation_id):
@@ -460,11 +510,86 @@ def case_claims(folder):
         for evidence,check in zip(c.get('evidence',[]),c.get('source_checks',[])):
             if check and evidence.get('source_check_id') and evidence.get('source_check_id')==check.get('id'):
                 legacy_checks.append({**check,'source_check_id':check.get('id')})
-        c['timeline']=claim_timeline.build_claim_timeline(
+        c['timeline']=claim_timeline.project_claim_timeline(
             {**c,'investigation_id':case_id},operations=c['latest_operations'],human_reviews=human_rows,
             reformulations=reformulations,scope_history=scope_history,legacy_source_checks=legacy_checks,
             revisions=revision_rows)
     return rows
+
+
+def _activity_record_fingerprint(record):
+    """Stable identity for a persisted row that predates per-row IDs."""
+    encoded=json.dumps(record,ensure_ascii=False,sort_keys=True,separators=(',',':'),default=str)
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def project_case_activity(case_id, meta, claims, local_documents):
+    """Compose Activity from canonical claim timelines and case-only records."""
+    case_events=[]
+    def add(record_type,record_id,event_type,timestamp,title,summary='',*,claim_id=None,view='overview',tone='info'):
+        row=claim_timeline.case_activity_event(case_id,record_type=record_type,record_id=record_id,
+            event_type=event_type,timestamp=timestamp,title=title,summary=summary,
+            claim_id=claim_id,target_view=view,tone=tone)
+        if row:case_events.append(row)
+
+    add('case.json',case_id,'case.created',meta.get('created_at'),'Expediente creado',
+        str(meta.get('question') or meta.get('title') or 'Pregunta y materiales de entrada conservados.'),view='question')
+    publication=meta.get('publication') if isinstance(meta.get('publication'),dict) else {}
+    published_at=publication.get('published_at')
+    if published_at:
+        summary=('Resultado inconcluso: no se consolidaron hechos. La ejecución sí terminó.'
+                 if publication.get('outcome')=='inconclusive' else 'Resultados conservados en este expediente.')
+        add('case.publication',case_id,'publication.completed',published_at,'Informe local terminado',summary,view='research')
+
+    claim_ids={str(claim.get('id')) for claim in claims if claim.get('id')}
+    for decision in meta.get('scope_history',[]):
+        if not isinstance(decision,dict) or not decision.get('id'):continue
+        selected=[str(value) for value in decision.get('selected_ids',[]) if value]
+        # Approved admissions for an existing claim already come from its canonical timeline.
+        if decision.get('status')=='approved' and claim_ids.intersection(selected):continue
+        timestamp=(decision.get('approved_at') or decision.get('cancelled_at')
+                   or decision.get('created_at') or decision.get('proposed_at'))
+        name={'approved':'Alcance aprobado','cancelled':'Ampliación descartada',
+              'candidate_added':'Hipótesis propuesta por el usuario',
+              'proposed':'Propuesta de alcance registrada'}.get(decision.get('status'),'Revisión del alcance registrada')
+        add('scope_history',decision['id'],'scope.'+str(decision.get('status') or 'recorded'),timestamp,name,
+            str(decision.get('decision_reason') or 'Cambio de alcance conservado; aprobar no significa comprobar.'),
+            claim_id=selected[0] if len(selected)==1 else None,view='question')
+
+    for document in local_documents or []:
+        document_id=str(document.get('id') or '')
+        if not document_id:continue
+        for imported in document.get('imports',[]):
+            if not isinstance(imported,dict):continue
+            record_id='sha256:'+_activity_record_fingerprint({'document_id':document_id,'import':imported})
+            claim_id=imported.get('claim_id')
+            add('documents.import',record_id,'document.imported',imported.get('imported_at') or imported.get('acquired_at'),
+                'PDF incorporado',str(imported.get('filename') or document_id)+' · Original conservado; no verifica afirmaciones.',
+                claim_id=claim_id if claim_id in claim_ids else None,view='claims' if claim_id in claim_ids else 'sources')
+        for extraction in document.get('extractions',[]):
+            if not isinstance(extraction,dict) or not extraction.get('id'):continue
+            ready=extraction.get('status')=='ready'
+            summary=(f"{extraction.get('pages','?')} páginas · {extraction.get('engine','motor no registrado')} · Revisa el pasaje y solicita reevaluación."
+                     if ready else str(extraction.get('error') or 'Preparación registrada.'))
+            add('documents.extraction',str(extraction['id']),'document.extraction.'+str(extraction.get('status') or 'unknown'),
+                extraction.get('finished_at') or extraction.get('started_at'),
+                'Texto PDF preparado' if ready else 'Preparación PDF '+str(extraction.get('status') or 'registrada'),summary,
+                view='sources',tone='info' if ready else 'failure' if extraction.get('status')=='error' else 'info')
+        for review in document.get('identity_reviews',[]):
+            if not isinstance(review,dict) or not review.get('id'):continue
+            add('documents.identity_review',str(review['id']),'document.identity_reviewed',review.get('reviewed_at'),
+                'Identidad documental revisada',str(review.get('actor') or 'Responsable no registrado')+' · No modifica veredictos.',view='sources')
+
+    for claim in claims:
+        for writing in claim.get('writing_history',[]):
+            if not isinstance(writing,dict):continue
+            record_id=writing.get('writer_result') or 'sha256:'+_activity_record_fingerprint(writing)
+            add('claim.writing_history',record_id,'report.written',writing.get('written_at'),'Informe generado',
+                'Redacción basada en las afirmaciones autorizadas para ese informe.',view='research')
+    # Claim-associated reviews, operations, receipts, verdicts, resolutions
+    # and technical checks already live in the per-claim canonical projection.
+    timelines=[claim.get('timeline',[]) for claim in claims]
+    return claim_timeline.project_case_activity(timelines,case_events)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -565,7 +690,13 @@ class Handler(BaseHTTPRequestHandler):
                 closure=research_closure.assess(meta,library.read(folder/'claims.json',[]),pipeline.closure_evidence)
                 meta['scope_expansion_available']=True
                 closure['consolidated']=bool(closure['ready'] and meta.get('publication',{}).get('consolidated') and meta.get('closure',{}).get('input_sha256')==closure.get('input_sha256'))
-                return self.respond({'meta':meta,'closure':closure,'claims':[{**c,'human_review_fingerprint':human_review.fingerprint(raw)} for c,raw in zip(case_claims(folder),library.read(folder/'claims.json',[]))], 'human_reviews':human_review.history(cid), 'human_review_available':True,'delete_available':True,'scope_available':True,'pdf_identity_review_available':True,'local_documents':documents.records(ROOT,cid),'revisions':revisions.history(cid),'uri':library.uri(cid),'related':related,'notes':(notes if notes.exists() else folder/'notas.md').read_text(encoding='utf-8-sig'),'documents':{key:(folder/name).read_text(encoding='utf-8') if (folder/name).exists() else 'Pendiente de esta pasada.' for key,name in [('research','resultados.md'),('sources','fuentes.md'),('audit','auditoria.md'),('architecture','resumen.md'),('question','pregunta.md')]}})
+                raw_claims=library.read(folder/'claims.json',[])
+                projected_claims=case_claims(folder)
+                claims=[{**claim,'human_review_fingerprint':human_review.fingerprint(raw)} for claim,raw in zip(projected_claims,raw_claims)]
+                local_documents=documents.records(ROOT,cid)
+                revision_rows=revisions.history(cid)
+                activity_timeline=project_case_activity(cid,meta,claims,local_documents)
+                return self.respond({'meta':meta,'closure':closure,'claims':claims,'activity_timeline':activity_timeline, 'human_reviews':human_review.history(cid), 'human_review_available':True,'delete_available':True,'scope_available':True,'pdf_identity_review_available':True,'local_documents':local_documents,'revisions':revision_rows,'uri':library.uri(cid),'related':related,'notes':(notes if notes.exists() else folder/'notas.md').read_text(encoding='utf-8-sig'),'documents':{key:(folder/name).read_text(encoding='utf-8') if (folder/name).exists() else 'Pendiente de esta pasada.' for key,name in [('research','resultados.md'),('sources','fuentes.md'),('audit','auditoria.md'),('architecture','resumen.md'),('question','pregunta.md')]}})
             except (ValueError,OSError,KeyError) as exc:return self.respond({'error':str(exc)},404)
         if self.path == '/api/status':
             with LOCK: job = dict(JOB)
@@ -704,15 +835,20 @@ class Handler(BaseHTTPRequestHandler):
                 if type(new_run) is not bool:raise ValueError('new_run debe ser booleano')
                 with LOCK:
                     active=active_operation('claim_research',cid,claim_id,inputs)
-                    if active:return self.respond({'operation_id':active['id'],'kind':'claim_research','deduplicated':True,'status':active.get('status')})
+                    if active:
+                        response=_claim_research_start_response(active,created=False,
+                            new_run_requested=new_run,coalesced=True)
+                        response['status']=active.get('status')
+                        return self.respond(response)
                     if JOB['status']=='running' or (INTEL/'pipeline.lock').exists():
                         return self.respond({'error':'Espera a que termine la ejecución activa'},409)
                     operation,created=operation_start('claim_research',cid,claim_id,inputs,new_run=new_run)
                     if created:JOB.update(status='running',log='',stage='Preparando investigación automática',case_id=cid,operation_id=operation['id'])
                 if created:threading.Thread(target=automatic_claim_research,args=(cid,claim_id,operation['id']),daemon=True).start()
-                return self.respond({'operation_id':operation['id'],'kind':'claim_research','deduplicated':not created,
-                                     'new_run':bool(operation.get('new_run')),
-                                     'retry':bool(not new_run and (operation.get('retry_requested_at') or operation.get('attempt_history')))})
+                response=_claim_research_start_response(operation,created=created,
+                    new_run_requested=new_run)
+                response['status']=operation.get('status')
+                return self.respond(response)
             mode = data.get('mode')
             if mode not in ('research','document','resume','sync','changelog','reevaluate','scope'): raise ValueError('Acción inválida.')
             with LOCK:
